@@ -321,8 +321,11 @@ export async function sendRequest(repo, request) {
 export const answerQuestion = (repo, q, choice, answer) =>
   sendRequest(repo, { type: 'answer', question: q.raw, choice: choice || '', answer: answer || '' });
 
-export const fileNote = (repo, q, slug) =>
-  sendRequest(repo, { type: 'file', question: q.raw, note: q.note, slug, ...(q.kind === 'loose' ? { label: q.label } : {}) });
+/** File a note under a project. Pass `newProject` ({name, desc}) with an empty `slug` to create the project first. */
+export const fileNote = (repo, q, slug, newProject) =>
+  sendRequest(repo, { type: 'file', question: q.raw, note: q.note, slug: slug || '',
+    ...(newProject ? { new_project: { name: newProject.name, desc: newProject.desc || '' } } : {}),
+    ...(q.kind === 'loose' ? { label: q.label } : {}) });
 
 export const createProject = (repo, { name, aliases, desc }, q) =>
   sendRequest(repo, { type: 'new-project', question: q ? q.raw : '', name, aliases: aliases || [], desc: desc || '' });

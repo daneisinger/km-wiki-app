@@ -439,12 +439,33 @@ function questionCard(q, alreadySent) {
     add(card, body);
     linesFor(q).then((text) => looseForm(q, text, body, submit));
   } else if (q.kind === 'project') {
+    // Pick an existing project, or "New project…" to name one and file the note under it in one go.
+    const NEW = '__new';
     const select = h('select', { id: `q${q.n}-project`, 'aria-label': 'Project' },
-      registry.map((p) => h('option', { value: p.slug, selected: p.name === q.guess }, p.name)));
-    add(card, select, h('div', { class: 'row' },
-      h('button', { class: 'btn primary', type: 'button', onclick: (e) => { if (!select.value) { toast('Choose a project first.'); return; } submit(e.target, () => core.fileNote(repo, q, select.value), 'Filing it.'); } }, q.kind === 'loose' ? 'File these lines here' : 'File under this project'),
-      q.kind === 'loose' ? h('button', { class: 'btn', type: 'button', onclick: (e) => submit(e.target, () => core.dismissLines(repo, q), 'Ignoring those lines.') }, 'Ignore these lines') : null));
-    if (q.kind === 'loose' && !q.guess) select.prepend(h('option', { value: '', selected: true, disabled: true }, 'Choose a project'));
+      registry.map((p) => h('option', { value: p.slug, selected: p.name === q.guess }, p.name)),
+      h('option', { value: NEW }, 'New project…'));
+    const name = h('input', { type: 'text', id: `q${q.n}-name` });
+    const desc = h('textarea', { id: `q${q.n}-desc`, placeholder: 'One or two sentences about the project (optional)' });
+    const fresh = h('div', { hidden: true },
+      h('label', { for: name.id }, 'Project name'), name,
+      h('label', { for: desc.id }, 'Description'), desc);
+    const go = h('button', { class: 'btn primary', type: 'button', onclick: (e) => {
+      if (select.value !== NEW) { submit(e.target, () => core.fileNote(repo, q, select.value), 'Filing it.'); return; }
+      const wanted = name.value.trim();
+      if (!wanted) { toast('Give the project a name first.'); return; }
+      const same = registry.find((p) => p.name.toLowerCase() === wanted.toLowerCase());
+      if (same) { submit(e.target, () => core.fileNote(repo, q, same.slug), 'Filing it.'); return; }
+      submit(e.target, () => core.fileNote(repo, q, '', { name: wanted, desc: desc.value }), 'Creating the project and filing it.');
+    } }, 'File under this project');
+    const sync = () => {
+      const making = select.value === NEW;
+      fresh.hidden = !making;
+      go.textContent = making ? 'Create project and file' : 'File under this project';
+    };
+    select.addEventListener('change', sync);
+    if (!registry.length) select.value = NEW;
+    sync();
+    add(card, select, fresh, h('div', { class: 'row' }, go));
   } else if (q.kind === 'unknown') {
     const name = h('input', { type: 'text', id: `q${q.n}-name`, value: q.name });
     const number = h('input', { type: 'text', id: `q${q.n}-number`, value: q.number, inputmode: 'numeric' });
