@@ -1,0 +1,657 @@
+// km-wiki web app: screens only. All GitHub access and file-format logic is in core.js.
+import * as core from './core.js';
+import { marked } from './vendor/marked.esm.js';
+
+const view = document.getElementById('view');
+const store = {
+  get(key, fallback) { try { return JSON.parse(localStorage.getItem('kmwiki.' + key)) ?? fallback; } catch { return fallback; } },
+  set(key, value) { try { localStorage.setItem('kmwiki.' + key, JSON.stringify(value)); } catch { /* private mode: carry on without */ } },
+};
+let repo = null;
+let registry = [];
+let lastSignature = '';
+
+// ---------- small DOM helpers ----------
+
+function h(tag, attrs = {}, ...children) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === 'class') el.className = v;
+    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (k === 'html') el.innerHTML = v;
+    else el.setAttribute(k, v === true ? '' : v);
+  }
+  add(el, children);
+  return el;
+}
+
+/** Append children, flattening nested lists and skipping null and false. */
+function add(el, ...children) {
+  for (const c of children.flat(Infinity)) if (c != null && c !== false) el.append(c.nodeType ? c : document.createTextNode(String(c)));
+}
+
+/** Replace an element's content. */
+function fill(el, ...children) {
+  el.replaceChildren();
+  add(el, children);
+}
+
+function toast(message, ms = 4000) {
+  const t = document.getElementById('toast');
+  t.textContent = message;
+  t.hidden = false;
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => { t.hidden = true; }, ms);
+}
+
+const crumb = (...items) => h('p', { class: 'crumb' }, items.flatMap((it, i) => [
+  i ? h('span', { 'aria-hidden': 'true' }, '›') : null,
+  it.href ? h('a', { href: it.href }, it.label) : h('b', {}, it.label),
+]));
+
+// ---------- markdown ----------
+
+const STATE_CLASS = { ' ': 'open', x: 'done', X: 'done', '?': 'question', '-': 'dropped' };
+
+function preprocess(md) {
+  let fenced = false;
+  return md.split('\n').map((line) => {
+    if (line.trimStart().startsWith('```')) fenced = !fenced;
+    if (fenced) return line;
+    line = line.replace(/^(\s*)- \[([ xX?\-])\] /, (_, sp, s) => `${sp}- <span class="cb cb-${STATE_CLASS[s]}"></span> `);
+    return line
+      .replace(/\{focus\}/g, '<span class="chip focus">focus</span>')
+      .replace(/\{attention\}/g, '<span class="chip attention">attention</span>')
+      .replace(/\{due: ([^}]+)\}/g, '<span class="chip due">due $1</span>')
+      .replace(/\{added: ([^}]+)\}/g, '<span class="chip added">added $1</span>')
+      .replace(/\{done: ([^}]+)\}/g, '<span class="chip donedate">done $1</span>')
+      .replace(/==(.+?)==/g, '<mark>$1</mark>');
+  }).join('\n');
+}
+
+/** Render markdown from the file at `path` into a safe DOM fragment with working in-app links and images. */
+function renderMarkdown(md, path) {
+  const doc = new DOMParser().parseFromString(marked.parse(preprocess(md), { gfm: true }), 'text/html');
+  doc.querySelectorAll('script,style,iframe,object,embed,form,link,meta').forEach((n) => n.remove());
+  for (const el of doc.body.querySelectorAll('*')) {
+    for (const a of [...el.attributes]) {
+      if (/^on/i.test(a.name) || (/^(href|src)$/i.test(a.name) && /^\s*javascript:/i.test(a.value))) el.removeAttribute(a.name);
+    }
+  }
+  for (const a of doc.body.querySelectorAll('a[href]')) {
+    const href = a.getAttribute('href');
+    if (/^[a-z]+:/i.test(href)) { a.target = '_blank'; a.rel = 'noopener'; continue; }
+    if (href.startsWith('#')) continue;
+    if (!/\.md(#.*)?$/i.test(href)) { a.removeAttribute('href'); continue; }   // originals are not viewable in the app yet
+    a.setAttribute('href', '#/page/' + core.resolvePath(path, href));
+    if (a.textContent === 'src') a.className = 'src';
+  }
+  for (const img of doc.body.querySelectorAll('img[src]')) {
+    const src = img.getAttribute('src');
+    if (/^(https?:|data:)/i.test(src)) continue;
+    img.dataset.path = core.resolvePath(path, src);
+    img.removeAttribute('src');
+  }
+  doc.body.querySelectorAll('table').forEach((t) => {
+    const wrap = doc.createElement('div');
+    wrap.className = 'tablewrap';
+    t.replaceWith(wrap);
+    wrap.append(t);
+  });
+  const box = h('div', { class: 'md' });
+  box.append(...doc.body.childNodes);
+  loadImages(box);
+  return box;
+}
+
+const imageUrls = new Map();   // repo path -> blob URL, so an image is fetched once per visit
+
+async function imageUrl(path) {
+  if (!imageUrls.has(path)) imageUrls.set(path, URL.createObjectURL(await (await repo.raw(path)).blob()));
+  return imageUrls.get(path);
+}
+
+async function loadImages(box) {
+  for (const img of box.querySelectorAll('img[data-path]')) {
+    try { img.src = await imageUrl(img.dataset.path); }
+    catch { img.alt = (img.alt || 'image') + ' (could not be loaded)'; }
+  }
+}
+
+/** The lines a question is about, when it concerns one group of lines in a note. */
+async function linesFor(q) {
+  try {
+    const record = JSON.parse((await repo.text(`raw/${q.note}/ingest.json`)) || '{}');
+    return ((record.waiting || []).find((w) => w.label === q.label) || {}).lines || null;
+  } catch { return null; }
+}
+
+/** The note a question is about, shown inside the card: page images first, transcription folded below. */
+function notePanel(noteId, label) {
+  const box = h('div', { class: 'notepanel' }, h('p', { class: 'muted' }, 'Loading the note…'));
+  core.loadNote(repo, noteId).then((note) => {
+    if (!note) { fill(box, h('p', { class: 'muted' }, 'The note could not be found.')); return; }
+    fill(box,
+      h('div', { class: 'meta' }, h('span', {}, note.title), note.meta.captured && note.meta.captured !== 'null' ? h('span', {}, note.meta.captured) : null),
+      note.images.map((path, i) => {
+        const img = h('img', { alt: `${note.title}, page ${i + 1}`, 'data-path': path });
+        const frame = h('button', { class: 'zoombox', type: 'button', 'aria-label': 'Page image. Tap to zoom in or out.', onclick: () => frame.classList.toggle('zoom') }, img);
+        return frame;
+      }),
+      note.images.length ? h('p', { class: 'help' }, 'Tap the page to zoom in, then drag to move around.') : null,
+      h('details', {}, h('summary', {}, 'Transcription'), renderMarkdown(note.transcription, `raw/${noteId}/source.md`)),
+      h('p', {}, h('a', { href: `#/page/raw/${noteId}/source.md` }, 'Open the full note page')));
+    loadImages(box);
+  }).catch((e) => fill(box, h('p', { class: 'muted' }, `The note could not be loaded: ${e.message}`)));
+  return box;
+}
+
+const inline = (text) => {
+  const span = h('span', { html: marked.parseInline(text.replace(/==(.+?)==/g, '<mark>$1</mark>')) });
+  span.querySelectorAll('script,style,iframe').forEach((n) => n.remove());
+  return span;
+};
+
+// ---------- pending requests (sent, not yet applied by the workflow) ----------
+
+function pendingRequests(files) {
+  const now = Date.now();
+  const list = store.get('pending', []).filter((p) => (files ? files.has(p.path) : true) || now - p.at < 90_000);
+  store.set('pending', list);
+  return list;
+}
+
+function addPending(path, question) {
+  store.set('pending', [...store.get('pending', []), { path, question: question || '', at: Date.now() }]);
+}
+
+async function refreshChrome() {
+  const files = await repo.tree();
+  const overview = await core.loadOverview(repo);
+  registry = overview.projects;
+  const badge = document.getElementById('badge-questions');
+  badge.hidden = !overview.questions.length;
+  badge.textContent = overview.questions.length;
+  const working = overview.pending.length;
+  const notice = document.getElementById('notice');
+  notice.hidden = !working;
+  notice.textContent = working ? `${working} item${working > 1 ? 's' : ''} waiting to be processed on GitHub. Results appear here within a minute or two.` : '';
+  pendingRequests(files);
+  return overview;
+}
+
+window.addEventListener('error', (e) => toast(`Something went wrong: ${e.message}`, 8000));
+window.addEventListener('unhandledrejection', (e) => toast(`Something went wrong: ${e.reason && e.reason.message || e.reason}`, 8000));
+
+// ---------- screens ----------
+
+async function home() {
+  const o = await refreshChrome();
+  fill(view, 
+    h('h1', {}, 'Projects'),
+    o.questions.length || o.inboxCount ? h('div', { class: 'cards' },
+      o.questions.length ? h('a', { class: 'card attn', href: '#/q' }, h('h3', {}, `${o.questions.length} question${o.questions.length > 1 ? 's' : ''} for you`), h('div', { class: 'muted' }, 'Answer them to keep the wiki accurate.')) : null,
+      o.inboxCount ? h('a', { class: 'card attn', href: '#/page/wiki/inbox.md' }, h('h3', {}, `${o.inboxCount} in the inbox`), h('div', { class: 'muted' }, 'Notes or parts of notes without a project.')) : null,
+    ) : null,
+    h('div', { class: 'cards' }, o.projects.map((p) => {
+      const number = p.aliases.find((a) => /^\d+$/.test(a));
+      return h('a', { class: 'card', href: '#/p/' + p.slug },
+        h('h3', {}, p.name), number ? h('div', { class: 'num' }, number) : null,
+        h('div', { class: 'counts' },
+          h('span', {}, h('b', {}, p.counts.open), ' open'),
+          h('span', {}, h('b', {}, p.counts.question), ' questions'),
+          h('span', {}, h('b', {}, p.counts.done), ' done')));
+    })),
+    h('div', { class: 'row' },
+      h('a', { class: 'btn', href: '#/new' }, 'New project'),
+      h('a', { class: 'btn', href: '#/page/wiki/index.md' }, 'All notes'),
+      h('a', { class: 'btn', href: '#/setup' }, 'Settings')),
+  );
+}
+
+async function project(slug) {
+  await refreshChrome();
+  const p = registry.find((x) => x.slug === slug);
+  const dir = `wiki/projects/${slug}/`;
+  const md = await repo.text(dir + 'project.md');
+  if (!p || md == null) throw new Error(`There is no project "${slug}".`);
+  const { body } = core.projectBody(md);
+  const tasksMd = await repo.text(dir + 'tasks.md');
+  const pages = (await repo.list(dir)).filter((f) => f.endsWith('.md') && !/\/(project|tasks)\.md$/.test(f));
+  const titles = await Promise.all(pages.map(async (f) => core.titleOf(await repo.text(f), f.split('/').pop())));
+  fill(view, 
+    crumb({ href: '#/', label: 'Projects' }, { label: p.name }),
+    renderMarkdown(body, dir + 'project.md'),
+    h('h2', {}, 'Tasks'),
+    taskSection(slug, tasksMd),
+    h('h2', {}, 'Pages'),
+    h('div', { class: 'row' }, pages.map((f, i) => h('a', { class: 'btn', href: '#/page/' + f }, titles[i])),
+      h('a', { class: 'btn primary', href: '#/add/' + slug }, 'Add a note to this project')),
+  );
+}
+
+function taskSection(slug, tasksMd) {
+  const groups = core.parseTasks(tasksMd);
+  if (!groups.length) return h('p', { class: 'muted' }, 'No tasks yet.');
+  const counts = core.countTasks(groups);
+  const seenAll = store.get('seen', {});
+  const firstVisit = !seenAll[slug];
+  const seen = new Set(seenAll[slug] || []);
+  const ids = groups.flatMap((g) => g.tasks.map((t) => t.id)).filter(Boolean);
+  seenAll[slug] = ids;
+  store.set('seen', seenAll);   // highlight shows once: everything on screen now counts as seen
+
+  const box = h('div');
+  let showDone = false;
+  const draw = () => {
+    const total = counts.open + counts.question + counts.done || 1;
+    fill(box, 
+      h('div', { class: 'bar-progress', role: 'img', 'aria-label': `${counts.done} of ${total} done` },
+        ['done', 'open', 'question'].map((k) => counts[k] ? h('span', { class: 'seg-' + k, style: `flex:${counts[k]}` }) : null)),
+      h('div', { class: 'row' },
+        h('span', { class: 'muted' }, `${counts.open} open · ${counts.question} questions · ${counts.done} done`),
+        counts.done ? h('button', { class: 'btn', type: 'button', onclick: () => { showDone = !showDone; draw(); } }, showDone ? 'Hide done' : 'Show done') : null),
+      groups.map((g) => {
+        const rows = g.tasks.filter((t) => showDone || t.state !== 'done' || t.justDone);
+        return rows.length ? [h('h3', {}, g.name), h('ul', { class: 'tasks' }, rows.map(row))] : null;
+      }),
+    );
+  };
+  const row = (t) => {
+    const isNew = !firstVisit && t.id && !seen.has(t.id);
+    const check = h('button', {
+      class: 'check', type: 'button', 'data-state': t.state, 'data-task': t.id || '',
+      'aria-label': `${t.id || 'Task'}: ${t.state}. ${t.state === 'done' ? 'Reopen' : 'Mark done'}`,
+    });
+    return h('li', { class: `task ${t.state}${isNew ? ' new' : ''}`, style: `margin-left:${t.depth * 22}px` },
+      check,
+      h('div', { class: 'text' },
+        t.id ? h('span', { class: 'id' }, t.id) : null, inline(t.text),
+        isNew ? h('span', { class: 'chip isnew' }, 'new') : null,
+        t.focus ? h('span', { class: 'chip focus' }, 'focus') : null,
+        t.attention ? h('span', { class: 'chip attention' }, 'attention') : null,
+        t.due ? h('span', { class: 'chip due' }, 'due ' + t.due) : null,
+        t.sources.slice(0, 2).map((s) => h('a', { class: 'src', href: '#/page/' + core.resolvePath(`wiki/projects/${slug}/tasks.md`, s) }, 'src')),
+        h('div', {}, t.added ? h('span', { class: 'chip added' }, 'added ' + t.added) : null, t.done ? h('span', { class: 'chip donedate' }, 'done ' + t.done) : null)));
+  };
+  const toggle = async (t) => {
+    if (t.state === 'dropped' || t.saving) return;
+    const was = t.state;
+    const done = was !== 'done';
+    t.state = done ? 'done' : 'open';
+    t.justDone = done;
+    t.saving = true;
+    counts[was]--; counts[t.state]++;
+    draw();
+    try {
+      await core.toggleTask(repo, slug, t.id, done);
+      toast(done ? `${t.id} marked done.` : `${t.id} reopened.`);
+    } catch (e) {
+      counts[t.state]--; counts[was]++;
+      t.state = was; t.justDone = false;
+      toast(`Could not save ${t.id}: ${e.message}`, 7000);
+    }
+    t.saving = false;
+    draw();
+  };
+  // One listener on the list itself, so it keeps working however often the rows are redrawn.
+  box.addEventListener('click', (e) => {
+    const target = e.target instanceof Element ? e.target.closest('[data-task]') : null;
+    if (!target || !box.contains(target)) return;
+    e.preventDefault();
+    const t = groups.flatMap((g) => g.tasks).find((x) => x.id === target.dataset.task);
+    if (t) toggle(t); else toast('This task has no ID yet, so it cannot be ticked here.');
+  });
+  draw();
+  return box;
+}
+
+async function page(path) {
+  await refreshChrome();
+  const md = await repo.text(path);
+  if (md == null) throw new Error(`There is no page at ${path}.`);
+  const { meta, body } = core.splitFrontMatter(md);
+  const parts = path.split('/');
+  const trail = [{ href: '#/', label: 'Projects' }];
+  if (parts[1] === 'projects' && parts[2]) {
+    const p = registry.find((x) => x.slug === parts[2]);
+    trail.push({ href: '#/p/' + parts[2], label: p ? p.name : parts[2] });
+  } else if (parts[0] === 'raw') trail.push({ href: '#/page/wiki/index.md', label: 'All notes' });
+  trail.push({ label: core.titleOf(md, parts[parts.length - 1]) });
+  if (parts[1] === 'projects' && parts[3] === 'tasks.md') {   // the full task list is interactive wherever it is opened
+    fill(view, crumb(...trail), h('h1', {}, core.titleOf(md, 'Tasks')), taskSection(parts[2], md));
+    return;
+  }
+  const facts = ['type', 'status', 'captured', 'device', 'project', 'origin_file'].filter((k) => meta[k] && meta[k] !== 'null');
+  fill(view, 
+    crumb(...trail),
+    facts.length ? h('div', { class: 'meta' }, facts.map((k) => h('span', {}, `${k.replace('_', ' ')}: ${meta[k]}`))) : null,
+    renderMarkdown(body, path),
+  );
+}
+
+async function questions() {
+  const o = await refreshChrome();
+  const pending = new Set(pendingRequests().map((p) => p.question));
+  const files = await repo.tree();
+  for (const q of o.questions) if (files.has(core.requestPath(q.raw))) pending.add(q.raw);
+  fill(view, 
+    crumb({ href: '#/', label: 'Projects' }, { label: 'Questions' }),
+    h('h1', {}, 'Questions for you'),
+    o.questions.length ? o.questions.map((q) => questionCard(q, pending.has(q.raw)))
+      : h('p', { class: 'muted' }, 'Nothing open.'),
+    h('p', {}, h('a', { href: '#/page/wiki/questions.md' }, 'See answered questions')),
+  );
+}
+
+/**
+ * Lines of a note that no project claimed: each line gets its own picker, because they
+ * often belong to different projects. New projects can be named right on the card.
+ */
+function looseForm(q, text, body, submit) {
+  if (!text) { fill(body, h('p', { class: 'muted' }, 'The lines could not be loaded. Open the note to see them.')); return; }
+  // An indented line, or one that is not a list item, hangs from the line above it.
+  const items = [];
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    if (items.length && !/^- /.test(line)) items[items.length - 1].text += '\n' + line;
+    else items.push({ text: line, to: drafts.get(`${q.raw}|to${items.length}`) || '' });
+  }
+  const fresh = drafts.get(`${q.raw}|new`) || [];     // [{name, number}] projects to create
+  drafts.set(`${q.raw}|new`, fresh);
+  const guess = registry.find((p) => p.name === q.guess);
+
+  let selects = [];
+  const names = () => fresh.map((p) => p.name.trim()).filter(Boolean);
+  // A new project's name changed: update the pickers in place, leaving the fields being typed in alone.
+  const refresh = () => {
+    for (const it of items) if (it.to.startsWith('new:') && !names().includes(it.to.slice(4))) it.to = '';
+    selects.forEach((sel, i) => fill(sel, options(items[i])));
+  };
+  const options = (it) => [
+      h('option', { value: '', disabled: true, selected: !it.to }, 'Choose…'),
+      registry.map((p) => h('option', { value: p.slug, selected: it.to === p.slug }, p.name)),
+      names().map((n) => h('option', { value: 'new:' + n, selected: it.to === 'new:' + n }, `New: ${n}`)),
+      h('option', { value: 'ignore', selected: it.to === 'ignore' }, 'Ignore this line'),
+    ];
+  const draw = () => {
+    for (const it of items) if (it.to.startsWith('new:') && !names().includes(it.to.slice(4))) it.to = '';
+    selects = items.map((it, i) => h('select', { 'aria-label': `Project for line ${i + 1}`, onchange: (e) => { it.to = e.target.value; drafts.set(`${q.raw}|to${i}`, it.to); } }, options(it)));
+    fill(body,
+      guess ? h('p', { class: 'help' }, `Best guess for some of these: ${guess.name}.`) : null,
+      items.map((it, i) => h('div', { class: 'assign' },
+        h('pre', { class: 'lines' }, it.text),
+        selects[i])),
+      fresh.length ? h('p', { class: 'help' }, 'New projects. Name one, then pick it for its lines above.') : null,
+      fresh.map((p, i) => h('div', { class: 'newproj' },
+        h('input', { type: 'text', placeholder: 'New project name', 'aria-label': 'New project name', value: p.name, oninput: (e) => { p.name = e.target.value; refresh(); } }),
+        h('input', { type: 'text', placeholder: 'Number (optional)', 'aria-label': 'Project number or other alias', inputmode: 'numeric', value: p.number, oninput: (e) => { p.number = e.target.value; } }),
+        h('button', { class: 'btn small', type: 'button', 'aria-label': 'Remove this new project', onclick: () => { fresh.splice(i, 1); draw(); } }, 'Remove'))),
+      h('div', { class: 'row tight' }, h('button', { class: 'btn small', type: 'button', onclick: () => { fresh.push({ name: '', number: '' }); draw(); const rows = body.querySelectorAll('.newproj'); rows[rows.length - 1].querySelector('input').focus(); } }, 'Add a new project')),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn primary', type: 'button', onclick: (e) => {
+          const missing = items.findIndex((it) => !it.to);
+          if (missing >= 0) { toast(`Choose where line ${missing + 1} goes first.`); return; }
+          const used = fresh.filter((p) => items.some((it) => it.to === 'new:' + p.name.trim()));
+          submit(e.target, () => core.assignLines(repo, q, items.map((it) => ({ text: it.text, to: it.to })),
+            used.map((p) => ({ name: p.name.trim(), aliases: p.number.split(',').map((x) => x.trim()).filter(Boolean) }))), 'Filing the lines.');
+        } }, 'File these lines'),
+        h('button', { class: 'btn', type: 'button', onclick: (e) => submit(e.target, () => core.dismissLines(repo, q), 'Ignoring those lines.') }, 'Ignore them all')));
+  };
+  draw();
+}
+
+const drafts = new Map();      // half-written answers, by question
+const openNotes = new Set();   // questions whose note is showing, so a redraw of the page does not close them
+
+function questionCard(q, alreadySent) {
+  const card = h('div', { class: 'qcard' + (alreadySent ? ' sent' : '') });
+  let panel = null;
+  const noteLink = q.note ? h('button', { class: 'btn small', type: 'button', 'aria-expanded': 'false', onclick: (e) => {
+    const open = !panel;
+    if (open) { panel = notePanel(q.note, q.label); slot.append(panel); } else { panel.remove(); panel = null; }
+    if (open) openNotes.add(q.raw); else openNotes.delete(q.raw);
+    e.currentTarget.textContent = open ? 'Hide the note' : 'Show the note';
+    e.currentTarget.setAttribute('aria-expanded', String(open));
+  } }, 'Show the note') : null;
+  const slot = h('div');
+  const sent = (msg) => { card.classList.add('sent'); fill(card, h('p', {}, inline(q.text)), h('p', { class: 'muted' }, msg)); };
+  if (alreadySent) { sent('Sent. It will be applied within a minute or two.'); return card; }
+
+  const submit = async (button, action, label) => {
+    button.disabled = true;
+    try {
+      const path = await action();
+      addPending(path, q.raw);
+      sent(`${label} It will be applied within a minute or two.`);
+      refreshChrome();
+    } catch (e) { button.disabled = false; toast(`Could not send: ${e.message}`, 7000); }
+  };
+
+  const proj = registry.find((p) => p.slug === q.project);
+  add(card, proj ? h('div', { class: 'meta' }, h('a', { href: '#/p/' + proj.slug }, proj.name)) : null, h('p', {}, inline(q.text)),
+    noteLink ? h('div', { class: 'row tight' }, noteLink) : null, slot);
+  if (noteLink && q.kind === 'unknown') linesFor(q).then((lines) => { if (lines) slot.before(h('pre', { class: 'lines' }, lines)); });
+  if (noteLink && openNotes.has(q.raw)) noteLink.click();   // the page was redrawn (a request landed, the workflow finished): keep open notes open
+  if (q.kind === 'loose') {
+    const body = h('div', {}, h('p', { class: 'muted' }, 'Loading the lines…'));
+    add(card, body);
+    linesFor(q).then((text) => looseForm(q, text, body, submit));
+  } else if (q.kind === 'project') {
+    const select = h('select', { id: `q${q.n}-project`, 'aria-label': 'Project' },
+      registry.map((p) => h('option', { value: p.slug, selected: p.name === q.guess }, p.name)));
+    add(card, select, h('div', { class: 'row' },
+      h('button', { class: 'btn primary', type: 'button', onclick: (e) => { if (!select.value) { toast('Choose a project first.'); return; } submit(e.target, () => core.fileNote(repo, q, select.value), 'Filing it.'); } }, q.kind === 'loose' ? 'File these lines here' : 'File under this project'),
+      q.kind === 'loose' ? h('button', { class: 'btn', type: 'button', onclick: (e) => submit(e.target, () => core.dismissLines(repo, q), 'Ignoring those lines.') }, 'Ignore these lines') : null));
+    if (q.kind === 'loose' && !q.guess) select.prepend(h('option', { value: '', selected: true, disabled: true }, 'Choose a project'));
+  } else if (q.kind === 'unknown') {
+    const name = h('input', { type: 'text', id: `q${q.n}-name`, value: q.name });
+    const number = h('input', { type: 'text', id: `q${q.n}-number`, value: q.number, inputmode: 'numeric' });
+    const desc = h('textarea', { id: `q${q.n}-desc`, placeholder: 'One or two sentences about the project (optional)' });
+    add(card, 
+      h('label', { for: name.id }, 'Project name'), name,
+      h('label', { for: number.id }, 'Project number or other alias'), number,
+      h('label', { for: desc.id }, 'Description'), desc,
+      h('div', { class: 'row' },
+        h('button', { class: 'btn primary', type: 'button', onclick: (e) => {
+          if (!name.value.trim()) { toast('Give the project a name first.'); return; }
+          submit(e.target, () => core.createProject(repo, { name: name.value.trim(), aliases: number.value.split(',').map((s) => s.trim()).filter(Boolean), desc: desc.value }, q), 'Creating the project.');
+        } }, 'Create project'),
+        h('button', { class: 'btn', type: 'button', onclick: (e) => submit(e.target, () => core.dismissLines(repo, q), 'Ignoring those lines.') }, 'Ignore these lines')));
+  } else {
+    const text = h('textarea', { id: `q${q.n}-answer`, 'aria-label': 'Your answer', placeholder: q.kind === 'decision' ? 'The reason, if you remember it (optional)' : 'Your answer' });
+    const buttons = q.kind === 'decision'
+      ? [h('button', { class: 'btn primary', type: 'button', onclick: (e) => submit(e.target, () => core.answerQuestion(repo, q, 'yes', text.value), 'Confirmed.') }, 'Yes, that is right'),
+         h('button', { class: 'btn', type: 'button', onclick: (e) => submit(e.target, () => core.answerQuestion(repo, q, 'no', text.value), 'Recorded as not right.') }, 'No')]
+      : [h('button', { class: 'btn primary', type: 'button', onclick: (e) => {
+           if (!text.value.trim()) { toast('Type an answer first, or choose one of the other buttons.'); return; }
+           submit(e.target, () => core.answerQuestion(repo, q, '', text.value), 'Answer sent.');
+         } }, 'Send answer')];
+    if (q.kind === 'decision') add(card, h('p', {}, h('a', { href: '#/page/' + q.decision }, 'Open the decision page')));
+    add(card, text, h('div', { class: 'row' }, buttons,
+      h('button', { class: 'btn', type: 'button', onclick: (e) => submit(e.target, () => core.answerQuestion(repo, q, 'dont-remember', ''), 'Recorded as not remembered.') }, "Don't remember"),
+      h('button', { class: 'btn', type: 'button', onclick: (e) => submit(e.target, () => core.answerQuestion(repo, q, 'skip', ''), 'Skipped.') }, 'Skip')));
+  }
+  // Anything typed or chosen survives a redraw of the page too.
+  card.querySelectorAll('input, textarea, select').forEach((field, i) => {
+    const key = `${q.raw}|${i}`;
+    if (drafts.has(key)) field.value = drafts.get(key);
+    const save = () => drafts.set(key, field.value);
+    field.addEventListener('input', save);
+    field.addEventListener('change', save);
+  });
+  return card;
+}
+
+// ---------- adding notes ----------
+
+const fileToBase64 = (blob) => new Promise((resolve, reject) => {
+  const r = new FileReader();
+  r.onload = () => resolve(String(r.result).split(',')[1]);
+  r.onerror = () => reject(new Error('The file could not be read.'));
+  r.readAsDataURL(blob);
+});
+
+/** Phone photos are far larger than the reader needs: shrink anything over 2600 px on its long side. */
+async function shrinkImage(file) {
+  if (!/^image\/(jpeg|png|webp)$/.test(file.type)) return { blob: file, name: file.name };
+  const bitmap = await createImageBitmap(file).catch(() => null);
+  if (!bitmap) return { blob: file, name: file.name };
+  const long = Math.max(bitmap.width, bitmap.height);
+  if (long <= 2600 && file.size < 4_000_000) return { blob: file, name: file.name };
+  const scale = Math.min(1, 2600 / long);
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  const blob = await new Promise((res) => canvas.toBlob(res, 'image/jpeg', 0.9));
+  return { blob, name: file.name.replace(/\.[^.]+$/, '') + '.jpg' };
+}
+
+async function addNote(presetSlug) {
+  await refreshChrome();
+  const file = h('input', { type: 'file', id: 'note-file', accept: 'image/*,application/pdf,.txt,.md' });
+  const typed = h('textarea', { id: 'note-text', placeholder: 'Or type a note here' });
+  const proj = h('select', { id: 'note-project' },
+    h('option', { value: '' }, 'Let the AI decide'),
+    registry.map((p) => h('option', { value: p.slug, selected: p.slug === presetSlug }, p.name)));
+  const caption = h('input', { type: 'text', id: 'note-caption', placeholder: 'For example: access panel proposal for the bench body' });
+  const go = h('button', { class: 'btn primary', type: 'button' }, 'Add to the wiki');
+  go.addEventListener('click', async () => {
+    const f = file.files[0];
+    if (!f && !typed.value.trim()) { toast('Choose a file or type a note first.'); return; }
+    go.disabled = true;
+    go.textContent = 'Uploading…';
+    try {
+      let name, base64;
+      if (f) {
+        const small = await shrinkImage(f);
+        name = small.name;
+        base64 = await fileToBase64(small.blob);
+      } else {
+        name = 'typed-note.md';
+        base64 = core.toBase64(typed.value.trim() + '\n');
+      }
+      await core.uploadNote(repo, { name, base64, project: proj.value, caption: caption.value });
+      fill(view, 
+        h('h1', {}, 'Note added'),
+        h('p', {}, 'It is being read and filed on GitHub. It will appear in the wiki within a minute or two.'),
+        h('div', { class: 'row' }, h('a', { class: 'btn primary', href: '#/add' + (proj.value ? '/' + proj.value : '') }, 'Add another'), h('a', { class: 'btn', href: '#/' }, 'Back to projects')));
+      refreshChrome();
+    } catch (e) {
+      go.disabled = false;
+      go.textContent = 'Add to the wiki';
+      toast(`Upload failed: ${e.message}`, 7000);
+    }
+  });
+  fill(view, 
+    crumb({ href: '#/', label: 'Projects' }, { label: 'Add note' }),
+    h('h1', {}, 'Add a note'),
+    h('label', { for: 'note-file' }, 'Photo, screenshot, PDF or text file'), file,
+    h('p', { class: 'help' }, 'On a phone this offers the camera, your photo library and Files.'),
+    h('label', { for: 'note-text' }, 'Typed note'), typed,
+    h('label', { for: 'note-project' }, 'Project'), proj,
+    h('label', { for: 'note-caption' }, 'Caption (optional)'), caption,
+    h('p', { class: 'help' }, 'A caption helps most with sketches that have no writing on them.'),
+    h('div', { class: 'row' }, go),
+  );
+}
+
+async function newProject() {
+  await refreshChrome();
+  const name = h('input', { type: 'text', id: 'np-name' });
+  const alias = h('input', { type: 'text', id: 'np-alias', placeholder: 'For example: 25014, Lobby piece' });
+  const desc = h('textarea', { id: 'np-desc', placeholder: 'One or two sentences. This is given to the AI every time it reads a note for this project.' });
+  const go = h('button', { class: 'btn primary', type: 'button', onclick: async () => {
+    if (!name.value.trim()) { toast('Give the project a name first.'); return; }
+    go.disabled = true;
+    try {
+      const path = await core.createProject(repo, { name: name.value.trim(), aliases: alias.value.split(',').map((s) => s.trim()).filter(Boolean), desc: desc.value });
+      addPending(path, '');
+      fill(view, h('h1', {}, 'Project requested'), h('p', {}, `"${name.value.trim()}" will appear in the project list within a minute or two.`),
+        h('div', { class: 'row' }, h('a', { class: 'btn', href: '#/' }, 'Back to projects')));
+      refreshChrome();
+    } catch (e) { go.disabled = false; toast(`Could not send: ${e.message}`, 7000); }
+  } }, 'Create project');
+  fill(view, 
+    crumb({ href: '#/', label: 'Projects' }, { label: 'New project' }),
+    h('h1', {}, 'New project'),
+    h('label', { for: 'np-name' }, 'Name'), name,
+    h('label', { for: 'np-alias' }, 'Number and other names, separated by commas'), alias,
+    h('label', { for: 'np-desc' }, 'Description'), desc,
+    h('div', { class: 'row' }, go),
+  );
+}
+
+function setup(message) {
+  const cfg = store.get('cfg', {});
+  const field = (id, label, value, type = 'text', help) => [h('label', { for: id }, label), h('input', { type, id, value: value || '', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false' }), help ? h('p', { class: 'help' }, help) : null];
+  const go = h('button', { class: 'btn primary', type: 'button', onclick: async () => {
+    const val = (id) => document.getElementById(id).value.trim();
+    const next = { owner: val('s-owner'), repo: val('s-repo'), branch: val('s-branch') || 'master', token: val('s-token'), apiBase: val('s-api') || 'https://api.github.com' };
+    go.disabled = true;
+    try {
+      await new core.Repo(next).tree(true);
+      store.set('cfg', next);
+      repo = new core.Repo(next);
+      location.hash = '#/';
+      route();
+    } catch (e) { go.disabled = false; toast(`Could not connect. ${e.message}`, 8000); }
+  } }, 'Connect');
+  fill(view, 
+    h('h1', {}, 'Connect to your wiki'),
+    message ? h('p', { class: 'error' }, message) : null,
+    h('p', {}, 'This app reads and writes your wiki repo on GitHub directly from this device. The details below are stored only in this browser.'),
+    field('s-owner', 'GitHub user or organisation', cfg.owner),
+    field('s-repo', 'Repository', cfg.repo || 'km-wiki'),
+    field('s-branch', 'Branch', cfg.branch || 'master'),
+    field('s-token', 'Access token', cfg.token, 'password',
+      'On GitHub: Settings › Developer settings › Fine-grained tokens. Give it access to this one repository only, with Contents set to Read and write.'),
+    h('details', {}, h('summary', {}, 'Advanced'), field('s-api', 'API address', cfg.apiBase || 'https://api.github.com')),
+    h('div', { class: 'row' }, go,
+      cfg.token ? h('button', { class: 'btn danger', type: 'button', onclick: () => { ['cfg', 'pending', 'seen'].forEach((k) => localStorage.removeItem('kmwiki.' + k)); repo = null; setup('This device has been disconnected.'); } }, 'Disconnect this device') : null),
+  );
+}
+
+// ---------- routing ----------
+
+async function route(scroll = true) {
+  const hash = decodeURIComponent(location.hash.replace(/^#\/?/, ''));
+  const cfg = store.get('cfg', null);
+  if (!cfg || !cfg.token || hash === 'setup') { setup(); return; }
+  repo = repo || new core.Repo(cfg);
+  try {
+    if (hash === '') await home();
+    else if (hash === 'q') await questions();
+    else if (hash === 'new') await newProject();
+    else if (hash === 'add' || hash.startsWith('add/')) await addNote(hash.slice(4));
+    else if (hash.startsWith('p/')) await project(hash.slice(2));
+    else if (hash.startsWith('page/')) await page(hash.slice(5));
+    else await home();
+    lastSignature = await signature();
+    if (scroll) window.scrollTo(0, 0);
+  } catch (e) {
+    fill(view, h('div', { class: 'error' }, h('p', {}, e.message || String(e)),
+      h('div', { class: 'row' }, h('a', { class: 'btn', href: '#/' }, 'Projects'), h('a', { class: 'btn', href: '#/setup' }, 'Settings'))));
+  }
+}
+
+async function signature() {
+  const files = await repo.tree();
+  return [...files].filter(([p]) => p.startsWith('wiki/') || p.startsWith('inbox/')).map(([p, s]) => p + s).join('|');
+}
+
+// While something is being processed on GitHub, look for the result and redraw when it lands.
+setInterval(async () => {
+  if (!repo || document.hidden) return;
+  if (/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement && document.activeElement.tagName)) return;
+  try {
+    await repo.tree(true);
+    const now = await signature();
+    if (now !== lastSignature) route(false);
+  } catch { /* offline or rate limited: try again next time */ }
+}, 20000);
+
+window.addEventListener('hashchange', () => route());
+route();

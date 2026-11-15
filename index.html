@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KM Wiki</title>
+<meta name="theme-color" content="#0d5c8c">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="KM Wiki">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;600&family=IBM+Plex+Sans+Condensed:wght@600&display=swap">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="bar">
+  <a class="brand" href="#/">KM Wiki</a>
+  <nav aria-label="Main">
+    <a href="#/q" id="nav-questions">Questions <span class="badge" id="badge-questions" hidden></span></a>
+    <a href="#/add" class="primary">Add note</a>
+  </nav>
+</header>
+<div id="notice" class="notice" hidden></div>
+<main id="view"><p class="muted">Loading…</p></main>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<script type="module" src="app.js"></script>
+</body>
+</html>
