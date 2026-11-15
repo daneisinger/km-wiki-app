@@ -2,6 +2,10 @@
 import * as core from './core.js';
 import { marked } from './vendor/marked.esm.js';
 
+// Shown under Settings so you can tell which copy a device is running. Raise it with every change to the app.
+const APP_VERSION = '2026-11-15.1';
+const APP_FILES = ['./', 'index.html', 'app.js', 'core.js', 'app.css', 'vendor/marked.esm.js', 'manifest.webmanifest'];
+
 const view = document.getElementById('view');
 const store = {
   get(key, fallback) { try { return JSON.parse(localStorage.getItem('kmwiki.' + key)) ?? fallback; } catch { return fallback; } },
@@ -632,7 +636,38 @@ function setup(message) {
     h('details', {}, h('summary', {}, 'Advanced'), field('s-api', 'API address', cfg.apiBase || 'https://api.github.com')),
     h('div', { class: 'row' }, go,
       cfg.token ? h('button', { class: 'btn danger', type: 'button', onclick: () => { ['cfg', 'pending', 'seen'].forEach((k) => localStorage.removeItem('kmwiki.' + k)); repo = null; setup('This device has been disconnected.'); } }, 'Disconnect this device') : null),
+    aboutApp(),
   );
+}
+
+/** The newest version on the server, read straight from app.js without using the browser's saved copy. */
+async function latestVersion() {
+  const res = await fetch('app.js', { cache: 'no-store' });
+  if (!res.ok) throw new Error(`the server answered ${res.status}`);
+  const found = /const APP_VERSION = '([^']+)'/.exec(await res.text());
+  if (!found) throw new Error('no version found in the app on the server');
+  return found[1];
+}
+
+/** Fetch every app file fresh, replacing the browser's saved copies, then restart the app. */
+async function reloadApp() {
+  await Promise.all(APP_FILES.map((f) => fetch(f, { cache: 'reload' }).then((r) => { if (!r.ok) throw new Error(`${f}: the server answered ${r.status}`); })));
+  location.reload();
+}
+
+function aboutApp() {
+  const status = h('p', { class: 'help', id: 'app-latest' }, 'Checking for a newer version…');
+  const reload = h('button', { class: 'btn', type: 'button', onclick: async () => {
+    reload.disabled = true;
+    try { await reloadApp(); } catch (e) { reload.disabled = false; toast(`Could not reload. ${e.message}`, 7000); }
+  } }, 'Reload app');
+  latestVersion().then((latest) => {
+    status.textContent = latest === APP_VERSION ? 'This is the latest version.' : `Version ${latest} is available. Tap Reload app to get it.`;
+  }, () => { status.textContent = 'Could not check for a newer version.'; });
+  return h('section', { class: 'about' },
+    h('h2', {}, 'This app'),
+    h('p', { id: 'app-version' }, `Version ${APP_VERSION}`), status,
+    h('div', { class: 'row' }, reload));
 }
 
 // ---------- routing ----------
