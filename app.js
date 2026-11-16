@@ -3,7 +3,7 @@ import * as core from './core.js';
 import { marked } from './vendor/marked.esm.js';
 
 // Shown under Settings so you can tell which copy a device is running. Raise it with every change to the app.
-const APP_VERSION = '2026-11-15.1';
+const APP_VERSION = '2026-11-16.1';
 const APP_FILES = ['./', 'index.html', 'app.js', 'core.js', 'app.css', 'vendor/marked.esm.js', 'manifest.webmanifest'];
 
 const view = document.getElementById('view');
@@ -235,35 +235,137 @@ async function project(slug) {
   );
 }
 
+const NEW_GROUP = '\u0000new';
+let holdRedraw = false;   // true while a task is being edited, so the periodic refresh does not close the editor
+
 function taskSection(slug, tasksMd) {
-  const groups = core.parseTasks(tasksMd);
-  if (!groups.length) return h('p', { class: 'muted' }, 'No tasks yet.');
-  const counts = core.countTasks(groups);
+  let md = tasksMd || '';
+  let groups = core.parseTasks(md);
+  const all = () => groups.flatMap((g) => g.tasks);
   const seenAll = store.get('seen', {});
   const firstVisit = !seenAll[slug];
   const seen = new Set(seenAll[slug] || []);
-  const ids = groups.flatMap((g) => g.tasks.map((t) => t.id)).filter(Boolean);
-  seenAll[slug] = ids;
-  store.set('seen', seenAll);   // highlight shows once: everything on screen now counts as seen
+  const markSeen = () => { seenAll[slug] = all().map((t) => t.id).filter(Boolean); store.set('seen', seenAll); };
+  markSeen();   // highlight shows once: everything on screen now counts as seen
 
   const box = h('div');
   let showDone = false;
-  const draw = () => {
-    const total = counts.open + counts.question + counts.done || 1;
-    fill(box, 
-      h('div', { class: 'bar-progress', role: 'img', 'aria-label': `${counts.done} of ${total} done` },
-        ['done', 'open', 'question'].map((k) => counts[k] ? h('span', { class: 'seg-' + k, style: `flex:${counts[k]}` }) : null)),
+  let editing = null;    // {id, text, due, focus, state, group, newGroup}: the task being edited and what has been typed
+  let adding = null;     // {text, due, focus, group, newGroup}: the new task being typed
+  let busy = false;
+  const justDone = new Set();
+  const justAdded = new Set();
+  const saving = new Set();
+  const shown = (t) => showDone || (t.state !== 'done' && t.state !== 'dropped') || justDone.has(t.id) || !!(editing && editing.id === t.id);
+  const load = (text) => { md = text; groups = core.parseTasks(md); markSeen(); };
+  const hold = () => { holdRedraw = !!(editing || adding); };
+
+  /** Run a save, show the result, and report whether it worked. */
+  const save = async (work, done) => {
+    busy = true; draw();
+    let ok = true;
+    try { done(await work()); } catch (e) { ok = false; toast(`Could not save: ${e.message}`, 7000); }
+    busy = false; hold(); draw();
+    return ok;
+  };
+
+  const groupPicker = (draft, current) => {
+    const names = core.taskGroups(md);
+    if (current && !names.includes(current)) names.unshift(current);
+    if (!names.length) names.push('General');
+    if (!draft.group) draft.group = current || names[0];
+    const other = h('input', { type: 'text', placeholder: 'Name of the new group', 'aria-label': 'Name of the new group', value: draft.newGroup || '',
+      hidden: draft.group !== NEW_GROUP, oninput: (e) => { draft.newGroup = e.target.value; } });
+    const select = h('select', { 'aria-label': 'Group', onchange: (e) => { draft.group = e.target.value; other.hidden = draft.group !== NEW_GROUP; if (!other.hidden) other.focus(); } },
+      names.map((n) => h('option', { value: n, selected: draft.group === n }, n)),
+      h('option', { value: NEW_GROUP, selected: draft.group === NEW_GROUP }, 'New group…'));
+    return [select, other];
+  };
+  const chosenGroup = (draft) => (draft.group === NEW_GROUP ? (draft.newGroup || '').trim() : draft.group);
+
+  const fields = (draft, label) => [
+    h('textarea', { 'aria-label': label, placeholder: label === 'New task' ? 'New task' : null, rows: 2, oninput: (e) => { draft.text = e.target.value; } }, draft.text),
+    h('div', { class: 'fieldrow' },
+      h('label', {}, 'Due', h('input', { type: 'date', value: draft.due || '', oninput: (e) => { draft.due = e.target.value; } })),
+      h('label', { class: 'tick' }, h('input', { type: 'checkbox', checked: draft.focus, onchange: (e) => { draft.focus = e.target.checked; } }), 'Star (focus)')),
+  ];
+
+  const editor = (t, g) => {
+    const d = editing;
+    // Done and dropped tasks that are not on screen are passed over, so each move is visible.
+    const skip = new Set(all().filter((x) => x.id !== t.id && !shown(x)).map((x) => x.id));
+    const canMove = (dir) => core.moveTask(md, t.id, dir, skip) != null;
+    const move = (dir) => save(() => core.shiftTask(repo, slug, t.id, dir, skip), load);
+    const submit = async () => {
+      const text = core.cleanTaskText(d.text);
+      const group = chosenGroup(d);
+      if (!text) { toast('A task needs some text. To remove it, set its status to Dropped.'); return; }
+      if (!group) { toast('Name the new group first.'); return; }
+      const changes = { text, due: d.due || null, focus: !!d.focus, state: d.state, ...(group !== g.name ? { group } : {}) };
+      const was = t.state;
+      if (await save(() => core.saveTask(repo, slug, t.id, changes), (out) => {
+        load(out);
+        if (d.state !== was && (d.state === 'done' || d.state === 'dropped')) justDone.add(t.id);
+        editing = null;
+      })) toast(`${t.id} saved.`);
+    };
+    return h('li', { class: 'task editing', style: `margin-left:${t.depth * 22}px` },
+      h('form', { class: 'taskedit', onsubmit: (e) => { e.preventDefault(); submit(); } },
+        h('div', { class: 'id' }, t.id),
+        fields(d, `Text of ${t.id}`),
+        h('div', { class: 'fieldrow' },
+          h('label', {}, 'Status', h('select', { onchange: (e) => { d.state = e.target.value; } },
+            [['open', 'Open'], ['question', 'Open question'], ['done', 'Done'], ['dropped', 'Dropped']].map(([v, name]) => h('option', { value: v, selected: d.state === v }, name)))),
+          h('label', {}, 'Group', groupPicker(d, g.name))),
+        h('div', { class: 'row' },
+          h('button', { class: 'btn primary', type: 'submit', disabled: busy }, 'Save'),
+          h('button', { class: 'btn', type: 'button', disabled: busy, onclick: () => { editing = null; hold(); draw(); } }, 'Cancel'),
+          h('button', { class: 'btn', type: 'button', disabled: busy || !canMove(-1), onclick: () => move(-1) }, 'Move up'),
+          h('button', { class: 'btn', type: 'button', disabled: busy || !canMove(1), onclick: () => move(1) }, 'Move down'))));
+  };
+
+  const addForm = () => {
+    const d = adding;
+    const submit = async () => {
+      const group = chosenGroup(d);
+      if (!core.cleanTaskText(d.text)) { toast('Type the task first.'); return; }
+      if (!group) { toast('Name the new group first.'); return; }
+      const name = (registry.find((x) => x.slug === slug) || {}).name || slug;
+      let id = null;
+      if (await save(() => core.newTask(repo, slug, name, group, d.text, { due: d.due || null, focus: !!d.focus }), (out) => {
+        load(out.md); id = out.id; justAdded.add(id); adding = null;
+      })) toast(`${id} added.`);
+    };
+    return h('form', { class: 'taskedit adding', onsubmit: (e) => { e.preventDefault(); submit(); } },
+      fields(d, 'New task'),
+      h('div', { class: 'fieldrow' }, h('label', {}, 'Group', groupPicker(d, null))),
       h('div', { class: 'row' },
-        h('span', { class: 'muted' }, `${counts.open} open · ${counts.question} questions · ${counts.done} done`),
-        counts.done ? h('button', { class: 'btn', type: 'button', onclick: () => { showDone = !showDone; draw(); } }, showDone ? 'Hide done' : 'Show done') : null),
+        h('button', { class: 'btn primary', type: 'submit', disabled: busy }, 'Add task'),
+        h('button', { class: 'btn', type: 'button', disabled: busy, onclick: () => { adding = null; hold(); draw(); } }, 'Cancel')));
+  };
+
+  const draw = () => {
+    const counts = core.countTasks(groups);
+    const total = counts.open + counts.question + counts.done || 1;
+    const hidden = counts.done + counts.dropped;
+    fill(box,
+      groups.length ? h('div', { class: 'bar-progress', role: 'img', 'aria-label': `${counts.done} of ${total} done` },
+        ['done', 'open', 'question'].map((k) => counts[k] ? h('span', { class: 'seg-' + k, style: `flex:${counts[k]}` }) : null)) : null,
+      h('div', { class: 'row' },
+        groups.length ? h('span', { class: 'muted' }, `${counts.open} open · ${counts.question} questions · ${counts.done} done` + (counts.dropped ? ` · ${counts.dropped} dropped` : ''))
+          : h('span', { class: 'muted' }, 'No tasks yet.'),
+        hidden ? h('button', { class: 'btn', type: 'button', onclick: () => { showDone = !showDone; draw(); } },
+          `${showDone ? 'Hide' : 'Show'} ${[counts.done ? 'done' : '', counts.dropped ? 'dropped' : ''].filter(Boolean).join(' and ')}`) : null,
+        adding ? null : h('button', { class: 'btn', type: 'button', 'data-add': '1', disabled: busy }, 'Add task')),
+      adding ? addForm() : null,
       groups.map((g) => {
-        const rows = g.tasks.filter((t) => showDone || t.state !== 'done' || t.justDone);
-        return rows.length ? [h('h3', {}, g.name), h('ul', { class: 'tasks' }, rows.map(row))] : null;
+        const rows = g.tasks.filter(shown);
+        return rows.length ? [h('h3', {}, g.name), h('ul', { class: 'tasks' }, rows.map((t) => (editing && editing.id === t.id ? editor(t, g) : row(t))))] : null;
       }),
     );
   };
   const row = (t) => {
-    const isNew = !firstVisit && t.id && !seen.has(t.id);
+    const isNew = (!firstVisit && t.id && !seen.has(t.id) && !t.manual) || justAdded.has(t.id);
     const check = h('button', {
       class: 'check', type: 'button', 'data-state': t.state, 'data-task': t.id || '',
       'aria-label': `${t.id || 'Task'}: ${t.state}. ${t.state === 'done' ? 'Reopen' : 'Mark done'}`,
@@ -277,36 +379,56 @@ function taskSection(slug, tasksMd) {
         t.attention ? h('span', { class: 'chip attention' }, 'attention') : null,
         t.due ? h('span', { class: 'chip due' }, 'due ' + t.due) : null,
         t.sources.slice(0, 2).map((s) => h('a', { class: 'src', href: '#/page/' + core.resolvePath(`wiki/projects/${slug}/tasks.md`, s) }, 'src')),
-        h('div', {}, t.added ? h('span', { class: 'chip added' }, 'added ' + t.added) : null, t.done ? h('span', { class: 'chip donedate' }, 'done ' + t.done) : null)));
+        h('div', {},
+          t.added ? h('span', { class: 'chip added' }, (t.manual ? 'added by you ' : 'added ') + t.added) : null,
+          t.done ? h('span', { class: 'chip donedate' }, 'done ' + t.done) : null,
+          t.edited ? h('span', { class: 'chip added' }, 'edited ' + t.edited) : null)),
+      t.id ? h('button', { class: 'editbtn', type: 'button', 'data-edit': t.id, 'aria-label': `Edit ${t.id}` }, 'Edit') : null);
   };
   const toggle = async (t) => {
-    if (t.state === 'dropped' || t.saving) return;
-    const was = t.state;
-    const done = was !== 'done';
+    if (t.state === 'dropped' || saving.has(t.id)) return;
+    const done = t.state !== 'done';
     t.state = done ? 'done' : 'open';
-    t.justDone = done;
-    t.saving = true;
-    counts[was]--; counts[t.state]++;
+    if (done) justDone.add(t.id); else justDone.delete(t.id);
+    saving.add(t.id);
     draw();
     try {
-      await core.toggleTask(repo, slug, t.id, done);
+      const out = await core.toggleTask(repo, slug, t.id, done);
+      if (out != null) load(out);
       toast(done ? `${t.id} marked done.` : `${t.id} reopened.`);
     } catch (e) {
-      counts[t.state]--; counts[was]++;
-      t.state = was; t.justDone = false;
+      load(md);   // back to what is saved
+      justDone.delete(t.id);
       toast(`Could not save ${t.id}: ${e.message}`, 7000);
     }
-    t.saving = false;
+    saving.delete(t.id);
     draw();
   };
   // One listener on the list itself, so it keeps working however often the rows are redrawn.
   box.addEventListener('click', (e) => {
-    const target = e.target instanceof Element ? e.target.closest('[data-task]') : null;
-    if (!target || !box.contains(target)) return;
-    e.preventDefault();
-    const t = groups.flatMap((g) => g.tasks).find((x) => x.id === target.dataset.task);
-    if (t) toggle(t); else toast('This task has no ID yet, so it cannot be ticked here.');
+    const hit = (name) => { const el = e.target instanceof Element ? e.target.closest(`[data-${name}]`) : null; return el && box.contains(el) ? el : null; };
+    const check = hit('task'), edit = hit('edit'), plus = hit('add');
+    if (check) {
+      e.preventDefault();
+      const t = all().find((x) => x.id === check.dataset.task);
+      if (t) toggle(t); else toast('This task has no ID yet, so it cannot be ticked here.');
+    } else if (edit && !busy) {
+      const t = all().find((x) => x.id === edit.dataset.edit);
+      if (!t) return;
+      editing = { id: t.id, text: t.text, due: t.due || '', focus: t.focus, state: t.state, group: '', newGroup: '' };
+      adding = null;
+      hold(); draw();
+      const field = box.querySelector('.task.editing textarea');
+      if (field) field.focus();
+    } else if (plus && !busy) {
+      adding = { text: '', due: '', focus: false, group: '', newGroup: '' };
+      editing = null;
+      hold(); draw();
+      const field = box.querySelector('.taskedit.adding textarea');
+      if (field) field.focus();
+    }
   });
+  holdRedraw = false;
   draw();
   return box;
 }
@@ -702,6 +824,7 @@ async function signature() {
 setInterval(async () => {
   if (!repo || document.hidden) return;
   if (/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement && document.activeElement.tagName)) return;
+  if (holdRedraw && view.querySelector('.taskedit')) return;   // a task is being edited: do not redraw under it
   try {
     await repo.tree(true);
     const now = await signature();

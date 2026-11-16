@@ -118,3 +118,20 @@ button.btn.small{font-size:13px;padding:6px 10px}
 .assign .lines{margin:0 0 4px}
 .newproj{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:0 0 8px}
 .newproj input{flex:1 1 140px;min-width:0}
+
+.editbtn{flex:none;font:600 12px var(--body);padding:4px 8px;border:1px solid transparent;border-radius:6px;background:none;color:var(--muted);cursor:pointer}
+.editbtn:hover,.editbtn:focus-visible{border-color:var(--line);color:var(--accent)}
+.task.dropped .text{color:var(--muted);text-decoration:line-through}
+.task.editing{display:block;padding:0;margin-top:6px;margin-bottom:6px}
+.taskedit{background:var(--sheet);border:1px solid var(--accent);border-radius:8px;padding:12px}
+.taskedit.adding{margin:10px 0}
+.taskedit .id{font:12px var(--mono);color:var(--muted);margin:0 0 6px}
+.taskedit textarea{min-height:56px}
+.fieldrow{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:flex-end;margin-top:8px}
+.fieldrow label{margin:0;flex:1 1 150px;min-width:0}
+.fieldrow label input,.fieldrow label select{display:block;margin-top:4px}
+.fieldrow input[type=date]{width:100%;font:16px var(--body);padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--sheet);color:var(--ink)}
+.fieldrow label.tick{display:flex;align-items:center;gap:8px;flex:0 1 auto;padding-bottom:9px}
+.fieldrow label.tick input{width:20px;height:20px;margin:0}
+.fieldrow input[type=text]{margin-top:6px}
+.taskedit [hidden]{display:none!important}

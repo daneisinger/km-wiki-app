@@ -213,6 +213,7 @@ export function parseTasks(md) {
       depth: Math.floor(m[1].length / 2),
       added: tag('added'), due: tag('due'), done: tag('done'),
       focus: /\{focus\}/.test(rest), attention: /\{attention\}/.test(rest),
+      edited: tag('edited'), manual: /\{manual\}/.test(rest),
       sources: [...rest.matchAll(/\[src\]\(([^)]+)\)/g)].map((x) => x[1]),
     };
     task.text = rest.replace(/\{[^}]*\}/g, '').replace(/\s*\[src\]\([^)]*\)/g, '').replace(/\s+/g, ' ').trim();
@@ -241,6 +242,164 @@ export function setTaskDone(md, id, done, date = today()) {
   }
   lines[i] = line;
   return lines.join('\n');
+}
+
+// ---------- editing tasks ----------
+//
+// Each function takes the text of tasks.md and returns the new text, so they can be used
+// inside Repo.edit and tested without GitHub. A task line is laid out as:
+//   - [ ] **T-012** text {tags} [src](link)
+
+const indentOf = (line) => line.match(/^\s*/)[0].length;
+const TAGS = /\{[^}]*\}/g;
+
+function splitTaskLine(line) {
+  const m = line.match(TASK);
+  if (!m) return null;
+  return {
+    indent: m[1], mark: m[2] === 'X' ? 'x' : m[2], id: m[3] || null,
+    text: m[4].replace(TAGS, '').replace(/\s*\[src\]\([^)]*\)/g, '').replace(/\s+/g, ' ').trim(),
+    tags: m[4].match(TAGS) || [],
+    srcs: m[4].match(/\[src\]\([^)]*\)/g) || [],
+  };
+}
+
+const joinTaskLine = (p) => `${p.indent}- [${p.mark}] ${p.id ? `**${p.id}** ` : ''}${[p.text, ...p.tags, ...p.srcs].join(' ')}`;
+
+/** Set `{name: value}` (or `{name}` for true), or remove it for null or false. New tags go first or last. */
+function setTag(tags, name, value, first = false) {
+  const at = tags.findIndex((t) => new RegExp(`^\\{${name}(:|\\})`).test(t));
+  const tag = value === true ? `{${name}}` : `{${name}: ${value}}`;
+  if (value == null || value === false || value === '') { if (at >= 0) tags.splice(at, 1); }
+  else if (at >= 0) tags[at] = tag;
+  else if (first) tags.unshift(tag);
+  else tags.push(tag);
+}
+
+/** Text typed by the owner, made safe to sit on one task line. */
+export function cleanTaskText(text) {
+  return String(text || '').replace(/[{]/g, '(').replace(/[}]/g, ')').replace(/\s+/g, ' ').trim();
+}
+
+const findTask = (lines, id) => lines.findIndex((l) => l.includes(`**${id}**`) && TASK.test(l));
+
+/** The task's line and the nested lines under it: [start, end). */
+function taskBlock(lines, i) {
+  let end = i + 1;
+  while (end < lines.length && lines[end].trim() && indentOf(lines[end]) > indentOf(lines[i])) end++;
+  return [i, end];
+}
+
+/** Names of every group heading in tasks.md, in order, including groups with no tasks. */
+export function taskGroups(md) {
+  return [...splitFrontMatter(md || '').body.matchAll(/^## (.+)$/gm)].map((m) => m[1].trim());
+}
+
+const STATE_MARK = { open: ' ', done: 'x', question: '?', dropped: '-' };
+
+/**
+ * Change a task's wording, due date, focus star or state. `changes` holds only what changes:
+ * {text, due (a date or null), focus (true/false), state ('open'|'done'|'question'|'dropped')}.
+ * The line is marked {edited: date}. Returns null if the task is not found.
+ */
+export function editTask(md, id, changes, date = today()) {
+  const lines = md.split('\n');
+  const i = findTask(lines, id);
+  if (i < 0) return null;
+  const p = splitTaskLine(lines[i]);
+  if ('text' in changes && cleanTaskText(changes.text)) p.text = cleanTaskText(changes.text);
+  if ('due' in changes) setTag(p.tags, 'due', changes.due || null, true);
+  if ('focus' in changes) setTag(p.tags, 'focus', !!changes.focus, true);
+  if (changes.state && STATE_MARK[changes.state] !== undefined && STATE_MARK[changes.state] !== p.mark) {
+    p.mark = STATE_MARK[changes.state];
+    setTag(p.tags, 'done', changes.state === 'done' ? date : null);
+  }
+  if (joinTaskLine(p) === joinTaskLine(splitTaskLine(lines[i]))) return md;   // nothing actually changed
+  setTag(p.tags, 'edited', null);
+  setTag(p.tags, 'edited', date);
+  lines[i] = joinTaskLine(p);
+  return lines.join('\n');
+}
+
+/**
+ * Move a task (with anything nested under it) one place up (-1) or down (+1) among its neighbours.
+ * Neighbours whose IDs are in `skip` (tasks not on screen, such as done ones) are passed over,
+ * so one move always changes what the owner sees. Null if it cannot move.
+ */
+export function moveTask(md, id, dir, skip = new Set()) {
+  const lines = md.split('\n');
+  let moved = false;
+  for (;;) {
+    const i = findTask(lines, id);
+    if (i < 0) return null;
+    const [, end] = taskBlock(lines, i);
+    const depth = indentOf(lines[i]);
+    const sibling = (k) => k >= 0 && k < lines.length && TASK.test(lines[k]) && indentOf(lines[k]) === depth;
+    let passed;
+    if (dir < 0) {
+      let j = i - 1;
+      while (j >= 0 && lines[j].trim() && indentOf(lines[j]) > depth) j--;
+      if (!sibling(j)) break;
+      passed = splitTaskLine(lines[j]).id;
+      lines.splice(j, end - j, ...lines.slice(i, end), ...lines.slice(j, i));
+    } else {
+      if (!sibling(end)) break;
+      passed = splitTaskLine(lines[end]).id;
+      const [, nextEnd] = taskBlock(lines, end);
+      lines.splice(i, nextEnd - i, ...lines.slice(end, nextEnd), ...lines.slice(i, end));
+    }
+    moved = true;
+    if (!skip.has(passed)) break;
+  }
+  return moved ? lines.join('\n') : null;
+}
+
+/** Put `block` (task lines) at the end of the group called `group`, adding the group at the end of the file if it is new. */
+function appendToGroup(lines, group, block) {
+  while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+  const heads = lines.map((l, k) => (/^## /.test(l) ? k : -1)).filter((k) => k >= 0);
+  const h = heads.find((k) => lines[k].slice(3).trim().toLowerCase() === group.trim().toLowerCase());
+  if (h === undefined) {
+    lines.push('', `## ${group.trim()}`, '', ...block);
+  } else {
+    const next = heads.find((k) => k > h) ?? lines.length;
+    let last = next - 1;
+    while (last > h && !lines[last].trim()) last--;
+    lines.splice(last + 1, 0, ...(last === h ? ['', ...block] : block));
+  }
+  lines.push('');
+  return lines;
+}
+
+/** Move a task (with anything nested under it) to the end of another group. A group that does not exist yet is created. */
+export function moveTaskToGroup(md, id, group) {
+  const lines = md.split('\n');
+  const i = findTask(lines, id);
+  if (i < 0 || !group || !group.trim()) return null;
+  let h = i;
+  while (h >= 0 && !/^## /.test(lines[h])) h--;
+  const depth = indentOf(lines[i]);
+  if (h >= 0 && depth === 0 && lines[h].slice(3).trim().toLowerCase() === group.trim().toLowerCase()) return md;
+  const [, end] = taskBlock(lines, i);
+  const block = lines.splice(i, end - i).map((l) => l.slice(depth));
+  return appendToGroup(lines, group, block).join('\n');
+}
+
+/**
+ * Add a task typed by the owner. It gets the next free ID and is marked {manual}, which
+ * stands in for the link to a note that tasks from notes carry. Returns {md, id}, or null if the text is empty.
+ */
+export function addTask(md, group, text, { due, focus } = {}, date = today()) {
+  const clean = cleanTaskText(text);
+  if (!clean) return null;
+  const next = Math.max(0, ...[...md.matchAll(/\bT-(\d+)\b/g)].map((m) => Number(m[1]))) + 1;
+  const id = `T-${String(next).padStart(3, '0')}`;
+  const tags = [];
+  if (due) tags.push(`{due: ${due}}`);
+  if (focus) tags.push('{focus}');
+  tags.push(`{added: ${date}}`, '{manual}');
+  const line = joinTaskLine({ indent: '', mark: ' ', id, text: clean, tags, srcs: [] });
+  return { md: appendToGroup(md.split('\n'), group && group.trim() ? group : 'General', [line]).join('\n'), id };
 }
 
 // ---------- questions ----------
@@ -358,6 +517,43 @@ export async function uploadNote(repo, { name, base64, project, caption }) {
 /** Tick or reopen a task directly (no workflow round trip needed). */
 export const toggleTask = (repo, slug, id, done) =>
   repo.edit(`wiki/projects/${slug}/tasks.md`, `${done ? 'Complete' : 'Reopen'} ${id} (${slug})`, (md) => setTaskDone(md, id, done));
+
+const tasksPath = (slug) => `wiki/projects/${slug}/tasks.md`;
+
+/** Run one of the editing functions above against tasks.md on GitHub. Returns the saved text. */
+async function changeTasks(repo, slug, message, change) {
+  const out = await repo.edit(tasksPath(slug), message, (md) => {
+    const next = change(md);
+    if (next == null) throw new Error('That task is no longer in the list. Reload the page and try again.');
+    return next;
+  });
+  if (out == null) throw new Error('The task list changed on GitHub at the same moment. Try again.');
+  return out;
+}
+
+/** Save an edit to one task. `changes` is as for editTask, plus an optional `group` to move it to. */
+export const saveTask = (repo, slug, id, changes) =>
+  changeTasks(repo, slug, `Edit ${id} (${slug})`, (md) => {
+    const out = editTask(md, id, changes);
+    return out != null && changes.group ? moveTaskToGroup(out, id, changes.group) : out;
+  });
+
+export const shiftTask = (repo, slug, id, dir, skip) =>
+  changeTasks(repo, slug, `Move ${id} (${slug})`, (md) => moveTask(md, id, dir, skip) ?? (findTask(md.split('\n'), id) < 0 ? null : md));
+
+/** Add a task typed by the owner; creates tasks.md if the project has none. Returns {md, id}. */
+export async function newTask(repo, slug, name, group, text, options) {
+  let id = null;
+  const add = (md) => { const out = addTask(md, group, text, options); id = out.id; return out.md; };
+  if (!cleanTaskText(text)) throw new Error('Type the task first.');
+  if (!(await repo.tree(true)).has(tasksPath(slug))) {
+    const md = add(`---\ntype: tasks\nproject: ${slug}\nupdated: ${today()}\n---\n\n# Tasks: ${name}\n`);
+    await repo.put(tasksPath(slug), toBase64(md), `Add ${id} (${slug})`);
+    return { md, id };
+  }
+  const md = await changeTasks(repo, slug, `Add a task (${slug})`, add);
+  return { md, id };
+}
 
 // ---------- loading pages ----------
 
