@@ -135,3 +135,19 @@ button.btn.small{font-size:13px;padding:6px 10px}
 .fieldrow label.tick input{width:20px;height:20px;margin:0}
 .fieldrow input[type=text]{margin-top:6px}
 .taskedit [hidden]{display:none!important}
+
+.fixable h2{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.fixedit{background:var(--sheet);border:1px solid var(--accent);border-radius:8px;padding:12px;margin:8px 0}
+.fixedit label:first-child{margin-top:0}
+.fixedit label input,.fixedit label textarea{display:block;margin-top:4px;font-weight:400}
+.fixedit textarea.mono{font:14px/1.5 var(--mono)}
+.fixtable{width:100%}
+.fixtable td:last-child,.fixtable th:last-child{width:1%;white-space:nowrap;border-left:0;padding-left:0}
+.fixtable td .md>:first-child{margin-top:0}
+.fixtable td .md>:last-child{margin-bottom:0}
+.fixtable td .md{display:inline}
+.fixtable td .md p{display:inline;margin:0}
+.fixtable tr.pendingrow td{background:var(--new)}
+.help.pending{color:var(--question)}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+.fixable .zoombox{max-width:560px}

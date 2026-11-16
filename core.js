@@ -435,6 +435,8 @@ export function parseQuestions(md) {
       q.label = loose[1];
       q.guess = (raw.match(/Best guess: ([^.]+)\./) || [])[1] || null;
       q.text = q.text.replace(/ \(group \d+\)/, '').replace(/\s*Best guess: [^.]+\./, '');
+    } else if (/You edited this task by hand/.test(raw)) {
+      q.kind = 'reword';   // a corrected wording held back because the owner had edited the task
     } else if (/^Which project does /.test(raw)) {
       q.kind = 'project';
       q.guess = (raw.match(/Best guess: ([^.]+)\./) || [])[1] || null;
@@ -517,6 +519,72 @@ export async function uploadNote(repo, { name, base64, project, caption }) {
 /** Tick or reopen a task directly (no workflow round trip needed). */
 export const toggleTask = (repo, slug, id, done) =>
   repo.edit(`wiki/projects/${slug}/tasks.md`, `${done ? 'Complete' : 'Reopen'} ${id} (${slug})`, (md) => setTaskDone(md, id, done));
+
+// ---------- corrections ----------
+//
+// The owner's fixes to what the wiki says: a project's description, its glossary and people
+// tables, and the transcription of a note. Each is sent as a request; the ingest script
+// stores it as a raw item of its own and applies it.
+
+const stripSrc = (text) => text.replace(/ *\[src\]\([^)]*\)/g, '');
+
+/** A project page as the text before its first section, then each "## name" section in order. */
+export function projectParts(md) {
+  const chunks = projectBody(md).body.split(/^## (.+)$/m);
+  const sections = [];
+  for (let i = 1; i < chunks.length; i += 2) sections.push({ name: chunks[i].trim(), text: chunks[i + 1].trim() });
+  return { pre: chunks[0].trim(), sections };
+}
+
+/** Section text as the owner edits it: paragraphs without their source links. */
+export const plainText = (text) => stripSrc(text).split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean).join('\n\n');
+
+/** Rows of a three-column table (Term | Meaning | Status): [{term, meaning, status}]. The header row is left out. */
+export function tableRows(text) {
+  const rows = [];
+  for (const line of text.split('\n')) {
+    if (!line.startsWith('|')) continue;
+    const cells = line.trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
+    if (cells[0] && !/^[-: ]+$/.test(cells[0])) rows.push({ term: cells[0], meaning: cells[1] || '', status: cells[2] || '' });
+  }
+  return rows.slice(1);
+}
+
+/**
+ * A note's source.md split for correcting: the text before the transcription, each transcription
+ * section ({index, heading, images: markdown image lines, text}), and the Notes at the end.
+ * `sections` is empty for a file that has no transcription to correct.
+ */
+export function noteParts(md) {
+  const { meta, body } = splitFrontMatter(md || '');
+  const heads = [...body.matchAll(/^## (?:Transcription|Page \d+[^\n]*)[ \t]*$/gm)];
+  if (!heads.length) return { meta, pre: body, sections: [], notes: '' };
+  const notesAt = [...body.matchAll(/^## Notes[ \t]*$/gm)].map((m) => m.index).filter((i) => i > heads[heads.length - 1].index).pop();
+  const stop = notesAt ?? body.length;
+  const sections = heads.map((m, i) => {
+    const lines = body.slice(m.index + m[0].length, i + 1 < heads.length ? heads[i + 1].index : stop).split('\n');
+    const images = [];
+    let k = 0;
+    for (; k < lines.length; k++) {
+      if (!lines[k].trim()) continue;
+      if (!/^!\[[^\]]*\]\([^)]*\)[ \t]*$/.test(lines[k])) break;
+      images.push(lines[k].trim());
+    }
+    return { index: i, heading: m[0].slice(3).trim(), images, text: lines.slice(k).join('\n').replace(/^\n+|\n+$/g, '') };
+  });
+  return { meta, pre: body.slice(0, heads[0].index).trim(), sections, notes: notesAt != null ? body.slice(notesAt).trim() : '' };
+}
+
+export const correctDescription = (repo, slug, text) =>
+  sendRequest(repo, { type: 'correct', target: 'description', slug, text });
+
+/** `target` is 'glossary' or 'people'. `row` is {was, term, meaning} to change or add a row, or {was, remove: true}. */
+export const correctRow = (repo, slug, target, row) =>
+  sendRequest(repo, { type: 'correct', target, slug, was: row.was || '', term: row.term || '', meaning: row.meaning || '', remove: !!row.remove });
+
+/** Replace the text of one transcription section of a note; the wiki is then checked against it. */
+export const correctTranscription = (repo, note, index, text) =>
+  sendRequest(repo, { type: 'correct', target: 'transcription', note, sections: [{ index, text }] });
 
 const tasksPath = (slug) => `wiki/projects/${slug}/tasks.md`;
 

@@ -3,7 +3,7 @@ import * as core from './core.js';
 import { marked } from './vendor/marked.esm.js';
 
 // Shown under Settings so you can tell which copy a device is running. Raise it with every change to the app.
-const APP_VERSION = '2026-11-16.1';
+const APP_VERSION = '2026-11-16.2';
 const APP_FILES = ['./', 'index.html', 'app.js', 'core.js', 'app.css', 'vendor/marked.esm.js', 'manifest.webmanifest'];
 
 const view = document.getElementById('view');
@@ -220,19 +220,188 @@ async function project(slug) {
   const dir = `wiki/projects/${slug}/`;
   const md = await repo.text(dir + 'project.md');
   if (!p || md == null) throw new Error(`There is no project "${slug}".`);
-  const { body } = core.projectBody(md);
   const tasksMd = await repo.text(dir + 'tasks.md');
   const pages = (await repo.list(dir)).filter((f) => f.endsWith('.md') && !/\/(project|tasks)\.md$/.test(f));
   const titles = await Promise.all(pages.map(async (f) => core.titleOf(await repo.text(f), f.split('/').pop())));
   fill(view, 
     crumb({ href: '#/', label: 'Projects' }, { label: p.name }),
-    renderMarkdown(body, dir + 'project.md'),
+    projectPage(slug, md),
     h('h2', {}, 'Tasks'),
     taskSection(slug, tasksMd),
     h('h2', {}, 'Pages'),
     h('div', { class: 'row' }, pages.map((f, i) => h('a', { class: 'btn', href: '#/page/' + f }, titles[i])),
       h('a', { class: 'btn primary', href: '#/add/' + slug }, 'Add a note to this project')),
   );
+}
+
+// ---------- corrections: edit what the wiki says, in place ----------
+
+const sentFixes = [];   // corrections sent from this device and not yet applied: {path, at, key, data}
+
+/** Corrections for `key` that GitHub has not applied yet, oldest first. They are shown as if applied, marked as pending. */
+function pendingFixes(key) {
+  const files = repo && repo.files;
+  return sentFixes.filter((f) => f.key === key && ((files && files.has(f.path)) || Date.now() - f.at < 15000)).map((f) => f.data);
+}
+
+/** Send a correction; on success remember it so the page can show it while GitHub applies it. */
+async function sendFix(button, key, data, action) {
+  button.disabled = true;
+  try {
+    sentFixes.push({ path: await action(), at: Date.now(), key, data });
+    toast('Saved. It shows as pending until GitHub has applied it, usually within a minute or two.', 6000);
+    refreshChrome().catch(() => {});
+    return true;
+  } catch (e) {
+    button.disabled = false;
+    toast(`Could not save: ${e.message}`, 7000);
+    return false;
+  }
+}
+
+const editButton = (label, onclick) => h('button', { class: 'editbtn', type: 'button', 'aria-label': label, onclick }, label.split(' ')[0]);
+const pendingNote = () => h('p', { class: 'help pending' }, 'Pending: GitHub is applying this change.');
+
+function projectPage(slug, md) {
+  const path = `wiki/projects/${slug}/project.md`;
+  const parts = core.projectParts(md);
+  return h('div', {},
+    parts.pre ? renderMarkdown(parts.pre, path) : null,
+    parts.sections.map((s) => (s.name === 'Description' ? descriptionBlock(slug, s.text, path)
+      : s.name === 'Glossary' ? tableBlock(slug, 'glossary', s, path)
+      : s.name === 'People and suppliers' ? tableBlock(slug, 'people', s, path)
+      : renderMarkdown(`## ${s.name}\n\n${s.text}`, path))));
+}
+
+function descriptionBlock(slug, text, path) {
+  const box = h('section', { class: 'fixable' });
+  let draft = null;   // the text being edited, or null when not editing
+  const draw = () => {
+    const pending = pendingFixes(`desc:${slug}`).pop();
+    const shown = pending ? pending.text : text;
+    const area = draft == null ? null : h('textarea', { 'aria-label': 'Description', rows: Math.max(4, draft.split('\n').length + 2), oninput: (e) => { draft = e.target.value; } }, draft);
+    fill(box,
+      h('h2', {}, 'Description', draft == null ? editButton('Edit the description', () => { draft = core.plainText(shown); draw(); box.querySelector('textarea').focus(); }) : null),
+      draft == null ? [renderMarkdown(shown, path), pending ? pendingNote() : null]
+        : h('form', { class: 'fixedit', onsubmit: async (e) => {
+          e.preventDefault();
+          const next = draft.trim();
+          if (!next) { toast('The description cannot be empty.'); return; }
+          if (next === core.plainText(shown)) { draft = null; draw(); return; }
+          if (await sendFix(e.submitter || e.target.querySelector('button'), `desc:${slug}`, { text: next }, () => core.correctDescription(repo, slug, next))) draft = null;
+          draw();
+        } },
+          area,
+          h('p', { class: 'help' }, 'A blank line starts a new paragraph. Paragraphs you leave alone keep their sources.'),
+          h('div', { class: 'row' },
+            h('button', { class: 'btn primary', type: 'submit' }, 'Save'),
+            h('button', { class: 'btn', type: 'button', onclick: () => { draft = null; draw(); } }, 'Cancel'))));
+  };
+  draw();
+  return box;
+}
+
+/** The Glossary or the People and suppliers table, with each row editable and a way to add one. */
+function tableBlock(slug, target, section, path) {
+  const words = target === 'glossary' ? { first: 'Term', second: 'Meaning', add: 'Add a term', one: 'term' } : { first: 'Name', second: 'Role', add: 'Add a person or supplier', one: 'name' };
+  const key = `${target}:${slug}`;
+  const box = h('section', { class: 'fixable' });
+  const plain = (t) => t.replace(/ *\[src\]\([^)]*\)/g, '').trim();
+  let draft = null;   // {was, term, meaning, confirmRemove}; was === '' for a new row
+  const draw = () => {
+    const rows = core.tableRows(section.text);
+    for (const fix of pendingFixes(key)) {
+      const at = rows.findIndex((r) => r.term.toLowerCase() === (fix.was || fix.term).toLowerCase());
+      if (fix.remove) { if (at >= 0) rows.splice(at, 1); continue; }
+      const row = { term: fix.term, meaning: fix.meaning, status: 'confirmed', pending: true };
+      if (at >= 0) rows[at] = row; else rows.push(row);
+    }
+    const form = () => {
+      const d = draft;
+      const send = async (button, data) => { if (await sendFix(button, key, data, () => core.correctRow(repo, slug, target, data))) draft = null; draw(); };
+      return h('form', { class: 'fixedit', onsubmit: (e) => {
+        e.preventDefault();
+        const term = d.term.trim(), meaning = d.meaning.trim();
+        if (!term) { toast(`Give the ${words.one} first.`); return; }
+        if (rows.some((r) => r.term.toLowerCase() === term.toLowerCase() && r.term.toLowerCase() !== d.was.toLowerCase())) { toast(`"${term}" is already in the list.`); return; }
+        send(e.submitter || e.target.querySelector('button'), { was: d.was, term, meaning });
+      } },
+        h('label', {}, words.first, h('input', { type: 'text', value: d.term, autocapitalize: 'off', oninput: (e) => { d.term = e.target.value; } })),
+        h('label', {}, words.second, h('textarea', { rows: 2, oninput: (e) => { d.meaning = e.target.value; } }, d.meaning)),
+        h('div', { class: 'row' },
+          h('button', { class: 'btn primary', type: 'submit' }, 'Save'),
+          h('button', { class: 'btn', type: 'button', onclick: () => { draft = null; draw(); } }, 'Cancel'),
+          d.was ? h('button', { class: 'btn danger', type: 'button', onclick: (e) => {
+            if (!d.confirmRemove) { d.confirmRemove = true; e.target.textContent = 'Tap again to remove'; return; }
+            send(e.target, { was: d.was, remove: true });
+          } }, 'Remove') : null));
+    };
+    const editingRow = (r) => draft && draft.was && draft.was.toLowerCase() === r.term.toLowerCase();
+    fill(box,
+      h('h2', {}, section.name),
+      rows.length ? h('div', { class: 'md' }, h('div', { class: 'tablewrap' }, h('table', { class: 'fixtable' },
+        h('thead', {}, h('tr', {}, h('th', {}, words.first), h('th', {}, words.second), h('th', {}, 'Status'), h('th', {}, h('span', { class: 'sr' }, 'Edit')))),
+        h('tbody', {}, rows.map((r) => (editingRow(r) ? h('tr', {}, h('td', { colspan: 4 }, form()))
+          : h('tr', { class: r.pending ? 'pendingrow' : null },
+            h('td', {}, renderMarkdown(r.term, path)), h('td', {}, renderMarkdown(r.meaning, path)),
+            h('td', {}, renderMarkdown(r.status, path), r.pending ? h('span', { class: 'chip' }, 'pending') : null),
+            h('td', {}, editButton(`Edit ${r.term}`, () => { draft = { was: r.term, term: r.term, meaning: plain(r.meaning) }; draw(); box.querySelector('.fixedit textarea').focus(); })))))))))
+        : h('p', { class: 'muted' }, 'Nothing here yet.'),
+      draft && !draft.was ? form() : h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', onclick: () => { draft = { was: '', term: '', meaning: '' }; draw(); box.querySelector('.fixedit input').focus(); } }, words.add)));
+  };
+  draw();
+  return box;
+}
+
+/** A note's page with each part of its transcription correctable in place. Null if this file has no transcription to correct. */
+function notePage(path, md) {
+  const id = path.split('/')[1];
+  const parts = core.noteParts(md);
+  if (!parts.sections.length || ['app', 'chat'].includes(parts.meta.device)) return null;
+  const box = h('div');
+  let editing = null;   // index of the section being corrected
+  let draft = '';
+  const draw = () => {
+    fill(box,
+      parts.pre ? renderMarkdown(parts.pre, path) : null,
+      parts.sections.map((s) => {
+        const key = `note:${id}:${s.index}`;
+        const pending = pendingFixes(key).pop();
+        const shown = pending ? pending.text : s.text;
+        const on = editing === s.index;
+        return h('section', { class: 'fixable' },
+          h('h2', {}, s.heading, on ? null : editButton('Correct this transcription', () => {
+            editing = s.index; draft = shown; draw();
+            const area = box.querySelector('.fixedit textarea');
+            area.style.height = `${Math.min(area.scrollHeight + 4, Math.round(window.innerHeight * 0.7))}px`;   // show as much as fits, wrapped lines included
+            area.focus();
+          })),
+          s.images.map((line) => {
+            const m = line.match(/^!\[([^\]]*)\]\(([^)\s]+)\)/);
+            const frame = h('button', { class: 'zoombox', type: 'button', 'aria-label': 'Page image. Tap to zoom in or out.', onclick: () => frame.classList.toggle('zoom') },
+              h('img', { alt: m[1] || 'page', 'data-path': core.resolvePath(path, m[2]) }));
+            return frame;
+          }),
+          on ? h('form', { class: 'fixedit', onsubmit: async (e) => {
+            e.preventDefault();
+            const next = draft.replace(/^\n+|\s+$/g, '');
+            if (!next.trim()) { toast('The transcription cannot be empty.'); return; }
+            if (next === shown) { editing = null; draw(); return; }
+            if (await sendFix(e.submitter || e.target.querySelector('button'), key, { text: next }, () => core.correctTranscription(repo, id, s.index, next))) editing = null;
+            draw();
+          } },
+            h('textarea', { class: 'mono', 'aria-label': `Transcription, ${s.heading}`, rows: Math.min(40, Math.max(8, draft.split('\n').length + 2)), spellcheck: 'false', oninput: (e) => { draft = e.target.value; } }, draft),
+            h('p', { class: 'help' }, 'Fix what was read wrong and leave the rest. Marks: [x] ticked, [ ] not ticked, (star), (circle), ~~crossed out~~, ==highlighted==. After you save, tasks and log entries that came from this note are checked against the corrected text.'),
+            h('div', { class: 'row' },
+              h('button', { class: 'btn primary', type: 'submit' }, 'Save'),
+              h('button', { class: 'btn', type: 'button', onclick: () => { editing = null; draw(); } }, 'Cancel')))
+            : [renderMarkdown(shown, path), pending ? pendingNote() : null]);
+      }),
+      parts.notes ? renderMarkdown(parts.notes, path) : null);
+    loadImages(box);
+  };
+  draw();
+  return box;
 }
 
 const NEW_GROUP = '\u0000new';
@@ -449,11 +618,12 @@ async function page(path) {
     fill(view, crumb(...trail), h('h1', {}, core.titleOf(md, 'Tasks')), taskSection(parts[2], md));
     return;
   }
-  const facts = ['type', 'status', 'captured', 'device', 'project', 'origin_file'].filter((k) => meta[k] && meta[k] !== 'null');
+  const facts = ['type', 'status', 'captured', 'device', 'project', 'origin_file', 'corrected'].filter((k) => meta[k] && meta[k] !== 'null');
+  const note = /^raw\/[^/]+\/source\.md$/.test(path) ? notePage(path, md) : null;   // a note's transcription can be corrected in place
   fill(view, 
     crumb(...trail),
     facts.length ? h('div', { class: 'meta' }, facts.map((k) => h('span', {}, `${k.replace('_', ' ')}: ${meta[k]}`))) : null,
-    renderMarkdown(body, path),
+    note || renderMarkdown(body, path),
   );
 }
 
@@ -592,6 +762,10 @@ function questionCard(q, alreadySent) {
     if (!registry.length) select.value = NEW;
     sync();
     add(card, select, fresh, h('div', { class: 'row' }, go));
+  } else if (q.kind === 'reword') {
+    add(card, h('div', { class: 'row' },
+      h('button', { class: 'btn primary', type: 'button', onclick: (e) => submit(e.target, () => core.answerQuestion(repo, q, 'yes', ''), 'Changing the task.') }, 'Use the corrected wording'),
+      h('button', { class: 'btn', type: 'button', onclick: (e) => submit(e.target, () => core.answerQuestion(repo, q, 'no', ''), 'Keeping your wording.') }, 'Keep mine')));
   } else if (q.kind === 'unknown') {
     const name = h('input', { type: 'text', id: `q${q.n}-name`, value: q.name });
     const number = h('input', { type: 'text', id: `q${q.n}-number`, value: q.number, inputmode: 'numeric' });
@@ -824,7 +998,7 @@ async function signature() {
 setInterval(async () => {
   if (!repo || document.hidden) return;
   if (/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement && document.activeElement.tagName)) return;
-  if (holdRedraw && view.querySelector('.taskedit')) return;   // a task is being edited: do not redraw under it
+  if ((holdRedraw && view.querySelector('.taskedit')) || view.querySelector('.fixedit')) return;   // something is being edited: do not redraw under it
   try {
     await repo.tree(true);
     const now = await signature();
