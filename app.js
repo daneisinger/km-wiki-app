@@ -3,7 +3,7 @@ import * as core from './core.js';
 import { marked } from './vendor/marked.esm.js';
 
 // Shown under Settings so you can tell which copy a device is running. Raise it with every change to the app.
-const APP_VERSION = '2026-11-17.2';
+const APP_VERSION = '2026-11-17.3';
 const APP_FILES = ['./', 'index.html', 'app.js', 'core.js', 'app.css', 'vendor/marked.esm.js', 'manifest.webmanifest'];
 
 const view = document.getElementById('view');
@@ -212,6 +212,7 @@ async function home() {
       h('a', { class: 'btn', href: '#/new' }, 'New project'),
       h('a', { class: 'btn', href: '#/page/wiki/index.md' }, 'All notes'),
       h('a', { class: 'btn', href: '#/review' }, 'Health check'),
+      h('a', { class: 'btn', href: '#/ask' }, 'Ask'),
       h('a', { class: 'btn', href: '#/setup' }, 'Settings')),
   );
 }
@@ -232,7 +233,8 @@ async function project(slug) {
     taskSection(slug, tasksMd),
     h('h2', {}, 'Pages'),
     h('div', { class: 'row' }, pages.map((f, i) => h('a', { class: 'btn', href: '#/page/' + f }, titles[i])),
-      h('a', { class: 'btn primary', href: '#/add/' + slug }, 'Add a note to this project')),
+      h('a', { class: 'btn primary', href: '#/add/' + slug }, 'Add a note to this project'),
+      h('a', { class: 'btn', href: '#/ask/' + slug }, 'Ask about this project')),
     h('h2', {}, 'Tell the wiki'),
     h('p', { class: 'muted' }, 'Say what to change in this project in your own words: tasks, log, description, glossary or decisions. The model makes the changes and lists them.'),
     instructBox(slug, 'project:' + slug, null, 'For example: T-030 is done; the clevis is only on the anchor end'),
@@ -662,6 +664,105 @@ function instructBox(slug, key, finding, placeholder, extra = null) {
   return box;
 }
 
+// ---------- ask ----------
+
+const askThreads = new Map();   // '*' or a project slug -> {turns: [{q, a, cost, error, saved}], busy}
+const ASK_FALLBACK = 'Answer the owner\'s questions from his wiki, given below. Link every fact to the file it comes from, using the path in its "=== FILE:" line.';
+
+function askHistory() { return store.get('ask', []); }
+function rememberAsk(scope, turns) {
+  const list = askHistory().filter((x) => !(x.scope === scope && x.turns[0] && x.turns[0].q === turns[0].q));
+  list.unshift({ scope, at: new Date().toISOString(), turns: turns.filter((t) => t.a).map(({ q, a, cost, saved }) => ({ q, a, cost, saved })) });
+  store.set('ask', list.slice(0, 30));
+}
+
+async function askScreen(slug) {
+  slug = slug || '';
+  const name = slug ? ((registry.find((x) => x.slug === slug) || {}).name || slug) : '';
+  const ai = store.get('ai', {});
+  const scope = slug || '*';
+  const title = name ? `Ask about ${name}` : 'Ask the wiki';
+  const trail = [{ href: '#/', label: 'Projects' }, ...(name ? [{ href: '#/p/' + slug, label: name }] : []), { label: 'Ask' }];
+  if (!ai.key) {
+    fill(view, crumb(...trail), h('h1', {}, title),
+      h('p', {}, 'Ask sends your question and the wiki to a model through OpenRouter, straight from this device. It needs an OpenRouter key, stored only in this browser.'),
+      h('div', { class: 'row' }, h('a', { class: 'btn primary', href: '#/setup' }, 'Add the key in Settings')));
+    return;
+  }
+  if (!askThreads.has(scope)) askThreads.set(scope, { turns: [], busy: false });
+  const thread = askThreads.get(scope);
+  const box = h('div', { class: 'ask' });
+  let draft = '';
+
+  const send = async (q) => {
+    q = q.trim();
+    if (!q || thread.busy) return;
+    thread.turns.push({ q });
+    thread.busy = true;
+    draft = '';
+    draw();
+    const turn = thread.turns[thread.turns.length - 1];
+    try {
+      const [settings, system] = await Promise.all([core.askSettings(repo), repo.text('tools/prompts/ask.md')]);
+      const context = await core.askContext(repo, slug || null, settings.maxChars);
+      const out = await core.askModel({ key: ai.key, model: ai.model || settings.model, system: system || ASK_FALLBACK,
+        context: context.text, turns: thread.turns, scope: name });
+      turn.a = out.text; turn.cost = out.cost; turn.dropped = context.dropped;
+      rememberAsk(scope, thread.turns);
+    } catch (e) { turn.error = e.message || String(e); }
+    thread.busy = false;
+    if (location.hash === (slug ? `#/ask/${slug}` : '#/ask')) draw();
+  };
+
+  const turnView = (t, i) => {
+    const saveBtn = t.a && !t.saved ? h('button', { class: 'btn', type: 'button', onclick: async (e) => {
+      e.target.disabled = true;
+      try {
+        t.saved = await core.saveAnswer(repo, thread.turns.slice(0, i + 1), slug || null);
+        rememberAsk(scope, thread.turns);
+        toast('Saved. It becomes a record in the wiki within a minute or two.', 6000);
+        refreshChrome().catch(() => {});
+        draw();
+      } catch (err) { e.target.disabled = false; toast(`Could not save: ${err.message}`, 7000); }
+    } }, 'Save to wiki') : null;
+    return h('div', { class: 'turn' },
+      h('p', { class: 'askq' }, t.q),
+      t.error ? h('div', { class: 'error' }, h('p', {}, t.error),
+        i === thread.turns.length - 1 ? h('button', { class: 'btn', type: 'button', onclick: () => { thread.turns.pop(); send(t.q); } }, 'Try again') : null)
+        : t.a ? h('div', { class: 'aska' },
+          renderMarkdown(t.a, 'ask.md'),
+          h('p', { class: 'help' }, (t.cost ? `Cost: $${t.cost.toFixed(4)}. ` : '') + (t.dropped ? `${t.dropped} older files were left out to fit the size limit. ` : '')),
+          t.saved ? h('p', { class: 'help' }, 'Saved: ', h('a', { href: `#/page/raw/${t.saved}/source.md` }, 'the record'), ' appears once GitHub has added it.') : null,
+          h('div', { class: 'row' }, saveBtn),
+          slug && i === thread.turns.length - 1 ? h('details', { class: 'askfix' }, h('summary', {}, 'Change the wiki based on this'),
+            instructBox(slug, `ask:${slug}:${thread.turns.length}`, null, 'Say what to change, for example: mark T-030 done')) : null)
+        : h('p', { class: 'muted thinking' }, 'Reading the wiki and thinking…'));
+  };
+
+  const draw = () => {
+    const history = askHistory().filter((x) => x.scope === scope);
+    const area = h('textarea', { rows: 3, 'aria-label': 'Question', placeholder: thread.turns.length ? 'Ask a follow-up question' : (name ? `Ask anything about ${name}` : 'Ask anything about your projects'),
+      oninput: (e) => { draft = e.target.value; },
+      onkeydown: (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(draft); } } }, draft);
+    fill(box,
+      thread.turns.map(turnView),
+      h('form', { class: 'askform', onsubmit: (e) => { e.preventDefault(); send(draft); } },
+        area,
+        h('div', { class: 'row' },
+          h('button', { class: 'btn primary', type: 'submit', disabled: thread.busy }, thread.turns.length ? 'Ask again' : 'Ask'),
+          thread.turns.length ? h('button', { class: 'btn', type: 'button', disabled: thread.busy, onclick: () => { thread.turns = []; draft = ''; draw(); } }, 'New question') : null)),
+      !thread.turns.length && history.length ? [h('h2', {}, 'Asked on this device'),
+        h('ul', { class: 'asklist' }, history.slice(0, 10).map((x) => h('li', {}, h('a', { href: '#', onclick: (e) => {
+          e.preventDefault(); thread.turns = x.turns.map((t) => ({ ...t })); draw(); window.scrollTo(0, 0);
+        } }, x.turns[0].q), h('span', { class: 'muted' }, ` ${x.at.slice(0, 10)}`))))] : null);
+    loadImages(box);
+  };
+  fill(view, crumb(...trail), h('h1', {}, title),
+    h('p', { class: 'muted' }, 'Answers come from the wiki and the notes behind it, with links. They stay on this device unless you save them.'),
+    box);
+  draw();
+}
+
 let healthAsked = null;   // {at, checked}: when "Run the check now" was used, and the report date then
 
 async function review() {
@@ -987,9 +1088,10 @@ async function newProject() {
   );
 }
 
+const field = (id, label, value, type = 'text', help) => [h('label', { for: id }, label), h('input', { type, id, value: value || '', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false' }), help ? h('p', { class: 'help' }, help) : null];
+
 function setup(message) {
   const cfg = store.get('cfg', {});
-  const field = (id, label, value, type = 'text', help) => [h('label', { for: id }, label), h('input', { type, id, value: value || '', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false' }), help ? h('p', { class: 'help' }, help) : null];
   const go = h('button', { class: 'btn primary', type: 'button', onclick: async () => {
     const val = (id) => document.getElementById(id).value.trim();
     const next = { owner: val('s-owner'), repo: val('s-repo'), branch: val('s-branch') || 'master', token: val('s-token'), apiBase: val('s-api') || 'https://api.github.com' };
@@ -1013,9 +1115,26 @@ function setup(message) {
       'On GitHub: Settings › Developer settings › Fine-grained tokens. Give it access to this one repository only, with Contents set to Read and write.'),
     h('details', {}, h('summary', {}, 'Advanced'), field('s-api', 'API address', cfg.apiBase || 'https://api.github.com')),
     h('div', { class: 'row' }, go,
-      cfg.token ? h('button', { class: 'btn danger', type: 'button', onclick: () => { ['cfg', 'pending', 'seen'].forEach((k) => localStorage.removeItem('kmwiki.' + k)); repo = null; setup('This device has been disconnected.'); } }, 'Disconnect this device') : null),
+      cfg.token ? h('button', { class: 'btn danger', type: 'button', onclick: () => { ['cfg', 'pending', 'seen', 'ai', 'ask'].forEach((k) => localStorage.removeItem('kmwiki.' + k)); repo = null; setup('This device has been disconnected.'); } }, 'Disconnect this device') : null),
+    cfg.token ? askSettingsSection() : null,
     aboutApp(),
   );
+}
+
+function askSettingsSection() {
+  const ai = store.get('ai', {});
+  const save = h('button', { class: 'btn', type: 'button', onclick: () => {
+    const key = document.getElementById('s-orkey').value.trim();
+    const model = document.getElementById('s-ormodel').value.trim();
+    store.set('ai', { ...(key ? { key } : {}), ...(model ? { model } : {}) });
+    toast(key ? 'Saved. Ask is ready on this device.' : 'Key removed from this device.');
+  } }, 'Save');
+  return h('section', { class: 'about' },
+    h('h2', {}, 'Ask'),
+    h('p', { class: 'help' }, 'Ask calls a model through OpenRouter from this device. The key is stored only in this browser. On openrouter.ai, under Keys, you can make a key just for this and give it a spending limit.'),
+    field('s-orkey', 'OpenRouter key', ai.key || '', 'password'),
+    field('s-ormodel', 'Model (optional)', ai.model || '', 'text', 'Leave empty to use ask_model from tools/ingest_config.json (Claude Haiku 5.5 unless changed). For example anthropic/claude-sonnet-5.5 for harder questions, at about three times the cost.'),
+    h('div', { class: 'row' }, save));
 }
 
 /** The newest version on the server, read straight from app.js without using the browser's saved copy. */
@@ -1059,6 +1178,7 @@ async function route(scroll = true) {
     if (hash === '') await home();
     else if (hash === 'q') await questions();
     else if (hash === 'review') await review();
+    else if (hash === 'ask' || hash.startsWith('ask/')) await askScreen(hash.slice(4));
     else if (hash === 'new') await newProject();
     else if (hash === 'add' || hash.startsWith('add/')) await addNote(hash.slice(4));
     else if (hash.startsWith('p/')) await project(hash.slice(2));
@@ -1083,6 +1203,7 @@ setInterval(async () => {
   if (/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement && document.activeElement.tagName)) return;
   if ((holdRedraw && view.querySelector('.taskedit')) || view.querySelector('.fixedit')) return;   // something is being edited: do not redraw under it
   if ([...view.querySelectorAll('.instruct textarea')].some((t) => t.value.trim())) return;   // an instruction is being typed
+  if (location.hash.startsWith('#/ask')) return;   // the conversation lives on this screen only
   try {
     await repo.tree(true);
     const now = await signature();

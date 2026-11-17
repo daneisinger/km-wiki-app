@@ -156,3 +156,13 @@ button.btn.small{font-size:13px;padding:6px 10px}
 .instruct{margin:8px 0}
 .instruct textarea{min-height:52px}
 .instruct .row{margin-top:6px}
+.ask .turn{margin:18px 0}
+.ask .askq{font-weight:600;background:var(--sheet);border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:0 0 8px}
+.ask .aska{border-left:3px solid var(--accent);padding:2px 0 2px 14px}
+.ask .aska .md img{max-width:100%;border:1px solid var(--line);border-radius:6px}
+.ask .thinking{animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.4}}
+.askform textarea{min-height:72px}
+.asklist{padding-left:18px}
+.asklist li{margin:6px 0}
+.askfix summary{cursor:pointer;color:var(--accent);margin:6px 0}

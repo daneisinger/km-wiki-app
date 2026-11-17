@@ -635,6 +635,109 @@ export async function ignoreFinding(repo, item, date = today()) {
   if (out == null) throw new Error('The list changed on GitHub at the same moment. Try again.');
 }
 
+// ---------- ask ----------
+//
+// Questions are answered by a model called straight from the device, with the owner's OpenRouter
+// key, so no server is needed. The whole wiki goes in one call while it is small enough:
+// every wiki page and every note's transcription, each headed by its path so answers can link to it.
+
+export const ASK_DEFAULTS = { model: 'anthropic/claude-haiku-5.5', maxChars: 600000, base: 'https://openrouter.ai/api/v1' };
+
+/** Model and size limit from tools/ingest_config.json ("ask_model", "ask_max_chars"), with defaults. */
+export async function askSettings(repo) {
+  let cfg = {};
+  try { cfg = JSON.parse((await repo.text('tools/ingest_config.json')) || '{}'); } catch { /* defaults */ }
+  return { model: cfg.ask_model || ASK_DEFAULTS.model, maxChars: Number(cfg.ask_max_chars) || ASK_DEFAULTS.maxChars };
+}
+
+/** Paths sent as context: wiki pages and note transcriptions. Generated lists and the health report are left out. */
+export function askPaths(paths) {
+  return [...paths].filter((p) => (/^wiki\/.+\.md$/.test(p) && p !== 'wiki/health.md') || /^raw\/[^/]+\/source\.md$/.test(p)).sort();
+}
+
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async () => { while (next < items.length) { const i = next++; out[i] = await fn(items[i]); } };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
+/**
+ * Arrange files as one context block. If it is over `maxChars`, notes from other projects go first
+ * (oldest first), then other projects' pages, so a question about `slug` keeps what matters most.
+ * Returns {text, count, dropped}.
+ */
+export function buildContext(files, slug = null, maxChars = ASK_DEFAULTS.maxChars) {
+  const mine = (f) => !!slug && (f.path.startsWith(`wiki/projects/${slug}/`)
+    || (f.path.startsWith('raw/') && new RegExp(`^projects?:.*\\b${slug.replace(/[-]/g, '\\-')}\\b`, 'm').test(f.text)));
+  let kept = files.filter((f) => f.text && f.text.trim());
+  const size = () => kept.reduce((n, f) => n + f.path.length + f.text.length + 20, 0);
+  const drop = (test) => { for (const f of [...kept]) { if (size() <= maxChars) return; if (test(f)) kept = kept.filter((x) => x !== f); } };
+  drop((f) => f.path.startsWith('raw/') && !mine(f));
+  drop((f) => f.path.startsWith('wiki/projects/') && !mine(f));
+  drop((f) => f.path.startsWith('raw/'));
+  const text = kept.map((f) => `=== FILE: ${f.path} ===\n${f.text.trim()}\n`).join('\n');
+  return { text, count: kept.length, dropped: files.length - kept.length };
+}
+
+/** Read the wiki for a question. */
+export async function askContext(repo, slug = null, maxChars = ASK_DEFAULTS.maxChars) {
+  const paths = askPaths((await repo.tree()).keys());
+  const texts = await mapLimit(paths, 8, (p) => repo.text(p));
+  return buildContext(paths.map((path, i) => ({ path, text: texts[i] || '' })), slug, maxChars);
+}
+
+/**
+ * Ask the model. `turns` is the conversation so far, [{q, a}], ending with the new question (no `a`).
+ * The wiki goes first in a block marked for caching, so a follow-up within a few minutes costs less.
+ * Returns {text, cost}.
+ */
+export async function askModel({ key, model, system, context, turns, base = ASK_DEFAULTS.base, scope = '', fetchImpl = fetch }) {
+  if (!key) throw new Error('Ask needs an OpenRouter key. Add it under Settings.');
+  const first = { role: 'user', content: [
+    { type: 'text', text: `# The wiki\n\n${context}`, cache_control: { type: 'ephemeral' } },
+    { type: 'text', text: (scope ? `Asked from the page of the project: ${scope}.\n\n` : '') + `# Question\n\n${turns[0].q}` },
+  ] };
+  const messages = [{ role: 'system', content: system }, first];
+  turns.slice(0, -1).forEach((t, i) => { messages.push({ role: 'assistant', content: t.a || '' }, { role: 'user', content: turns[i + 1].q }); });
+  const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${key}`, 'X-Title': 'km-wiki ask' };
+  if (typeof location !== 'undefined' && location.origin && location.origin.startsWith('http')) headers['HTTP-Referer'] = location.origin;
+  let res;
+  try {
+    res = await fetchImpl(`${base.replace(/\/$/, '')}/chat/completions`, { method: 'POST', headers,
+      body: JSON.stringify({ model, temperature: 0.2, max_tokens: 4000, usage: { include: true }, messages }) });
+  } catch (e) { throw new Error(`Could not reach OpenRouter (${e.message}). Check the connection.`); }
+  let data = {};
+  try { data = await res.json(); } catch { /* handled below */ }
+  if (!res.ok || data.error) {
+    const msg = (data.error && (data.error.message || JSON.stringify(data.error))) || `HTTP ${res.status}`;
+    if (res.status === 401) throw new Error('OpenRouter refused the key. Check it under Settings.');
+    if (res.status === 402) throw new Error('The OpenRouter account is out of credit.');
+    throw new Error(`OpenRouter: ${msg}`.slice(0, 300));
+  }
+  const choice = (data.choices || [])[0] || {};
+  let text = (choice.message || {}).content || '';
+  if (Array.isArray(text)) text = text.map((x) => x.text || '').join('');
+  if (!text.trim()) throw new Error('The model gave an empty answer. Try again.');
+  if (choice.finish_reason === 'length') text += '\n\n*(The answer was cut off at its length limit.)*';
+  return { text, cost: (data.usage || {}).cost || 0 };
+}
+
+/** The id the script gives a saved answer, chosen now so the app can link to it. */
+export function questionId(now = new Date()) {
+  const iso = now.toISOString();
+  return `${iso.slice(0, 10)}-question-${iso.slice(11, 19).replace(/:/g, '')}`;
+}
+
+/** Keep a conversation from Ask in the wiki as a record. Returns the record's id. */
+export async function saveAnswer(repo, turns, slug = null) {
+  const record = questionId();
+  await sendRequest(repo, { type: 'save-answer', record, project: slug,
+    turns: turns.filter((t) => t.a).map((t) => ({ q: t.q, a: t.a })) });
+  return record;
+}
+
 // ---------- instructions ----------
 
 /** The id the script gives the record of an instruction sent now, so the app can link to it straight away. */
