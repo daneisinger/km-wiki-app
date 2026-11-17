@@ -586,6 +586,58 @@ export const correctRow = (repo, slug, target, row) =>
 export const correctTranscription = (repo, note, index, text) =>
   sendRequest(repo, { type: 'correct', target: 'transcription', note, sections: [{ index, text }] });
 
+// ---------- health check ----------
+//
+// tools/health.py writes wiki/health.md. Items the owner leaves as they are go in
+// wiki/health-ignored.json (key: {project, kind, text, on}) and are not raised again.
+
+export const HEALTH_IGNORED = 'wiki/health-ignored.json';
+
+/** The report as {checked, basicOnly, groups: [{name, slug, items: [{key, kind, text, project}]}]}, or null if there is none yet. */
+export function parseHealth(md) {
+  if (!md) return null;
+  const { meta, body } = splitFrontMatter(md);
+  const groups = [];
+  let cur = null;
+  for (const line of body.split('\n')) {
+    const head = line.match(/^## (.+?)(?:\s*<!-- project: (\S+) -->)?\s*$/);
+    if (head) { cur = { name: head[1].trim(), slug: head[2] || null, items: [] }; groups.push(cur); continue; }
+    const item = line.match(/^- \*\*(.+?):\*\* (.*?)\s*<!-- key: (\S+) -->\s*$/);
+    if (item && cur) cur.items.push({ kind: item[1], text: item[2], key: item[3], project: cur.slug });
+  }
+  return { checked: meta.checked || '', basicOnly: /model check did not run/.test(body), groups };
+}
+
+export function parseIgnored(text) {
+  try { return JSON.parse(text || '{}') || {}; } catch { return {}; }
+}
+
+/** The report without the items left as they are. */
+export function visibleHealth(report, ignored) {
+  if (!report) return null;
+  const groups = report.groups.map((g) => ({ ...g, items: g.items.filter((i) => !ignored[i.key]) })).filter((g) => g.items.length);
+  return { ...report, groups, count: groups.reduce((n, g) => n + g.items.length, 0) };
+}
+
+/** Record that the owner wants an item left as it is. */
+export async function ignoreFinding(repo, item, date = today()) {
+  const entry = { project: item.project, kind: item.kind, text: stripSrc(item.text).replace(/\s*\[[^\]]*\]\([^)]*\)/g, '').trim(), on: date };
+  const write = (o) => `${JSON.stringify({ ...o, [item.key]: entry }, null, 1)}\n`;
+  const message = `Leave as is: ${item.key}`;
+  if (!(await repo.tree(true)).has(HEALTH_IGNORED)) {
+    await repo.put(HEALTH_IGNORED, toBase64(write({})), message);
+    return;
+  }
+  const out = await repo.edit(HEALTH_IGNORED, message, (text) => {
+    const o = parseIgnored(text);
+    return o[item.key] ? null : write(o);
+  });
+  if (out == null) throw new Error('The list changed on GitHub at the same moment. Try again.');
+}
+
+/** Ask the workflow to run the health check now. */
+export const requestHealthCheck = (repo) => sendRequest(repo, { type: 'health' });
+
 const tasksPath = (slug) => `wiki/projects/${slug}/tasks.md`;
 
 /** Run one of the editing functions above against tasks.md on GitHub. Returns the saved text. */
@@ -627,8 +679,9 @@ export async function newTask(repo, slug, name, group, text, options) {
 
 /** Everything a home screen needs. */
 export async function loadOverview(repo) {
-  const [yaml, questions, inbox] = await Promise.all([
+  const [yaml, questions, inbox, health, ignored] = await Promise.all([
     repo.text('wiki/projects.yaml'), repo.text('wiki/questions.md'), repo.text('wiki/inbox.md'),
+    repo.text('wiki/health.md'), repo.text(HEALTH_IGNORED),
   ]);
   const projects = parseRegistry(yaml || '');
   await Promise.all(projects.map(async (p) => {
@@ -636,7 +689,7 @@ export async function loadOverview(repo) {
   }));
   const waiting = ((inbox || '').split('\n## ')[0].match(/^- .*\]\(\.\.\/raw\//gm) || []).length;
   const pending = (await repo.list('inbox/')).filter((p) => !p.endsWith('README.txt'));
-  return { projects, questions: parseQuestions(questions), inboxCount: waiting, pending };
+  return { projects, questions: parseQuestions(questions), inboxCount: waiting, pending, health: visibleHealth(parseHealth(health), parseIgnored(ignored)) };
 }
 
 /**

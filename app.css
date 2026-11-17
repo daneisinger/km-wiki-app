@@ -151,3 +151,5 @@ button.btn.small{font-size:13px;padding:6px 10px}
 .help.pending{color:var(--question)}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
 .fixable .zoombox{max-width:560px}
+.qcard.health{border-left-color:var(--accent)}
+.qcard.health .md>:first-child{margin-top:0}

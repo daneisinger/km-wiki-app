@@ -3,7 +3,7 @@ import * as core from './core.js';
 import { marked } from './vendor/marked.esm.js';
 
 // Shown under Settings so you can tell which copy a device is running. Raise it with every change to the app.
-const APP_VERSION = '2026-11-16.2';
+const APP_VERSION = '2026-11-17.1';
 const APP_FILES = ['./', 'index.html', 'app.js', 'core.js', 'app.css', 'vendor/marked.esm.js', 'manifest.webmanifest'];
 
 const view = document.getElementById('view');
@@ -194,9 +194,10 @@ async function home() {
   const o = await refreshChrome();
   fill(view, 
     h('h1', {}, 'Projects'),
-    o.questions.length || o.inboxCount ? h('div', { class: 'cards' },
+    o.questions.length || o.inboxCount || (o.health && o.health.count) ? h('div', { class: 'cards' },
       o.questions.length ? h('a', { class: 'card attn', href: '#/q' }, h('h3', {}, `${o.questions.length} question${o.questions.length > 1 ? 's' : ''} for you`), h('div', { class: 'muted' }, 'Answer them to keep the wiki accurate.')) : null,
       o.inboxCount ? h('a', { class: 'card attn', href: '#/page/wiki/inbox.md' }, h('h3', {}, `${o.inboxCount} in the inbox`), h('div', { class: 'muted' }, 'Notes or parts of notes without a project.')) : null,
+      o.health && o.health.count ? h('a', { class: 'card attn', href: '#/review' }, h('h3', {}, `${o.health.count} thing${o.health.count > 1 ? 's' : ''} to review`), h('div', { class: 'muted' }, `From the health check on ${o.health.checked}.`)) : null,
     ) : null,
     h('div', { class: 'cards' }, o.projects.map((p) => {
       const number = p.aliases.find((a) => /^\d+$/.test(a));
@@ -210,6 +211,7 @@ async function home() {
     h('div', { class: 'row' },
       h('a', { class: 'btn', href: '#/new' }, 'New project'),
       h('a', { class: 'btn', href: '#/page/wiki/index.md' }, 'All notes'),
+      h('a', { class: 'btn', href: '#/review' }, 'Health check'),
       h('a', { class: 'btn', href: '#/setup' }, 'Settings')),
   );
 }
@@ -627,6 +629,50 @@ async function page(path) {
   );
 }
 
+let healthAsked = null;   // {at, checked}: when "Run the check now" was used, and the report date then
+
+async function review() {
+  const [md, ign] = await Promise.all([repo.text('wiki/health.md'), repo.text(core.HEALTH_IGNORED)]);
+  const ignored = core.parseIgnored(ign);
+  const report = core.visibleHealth(core.parseHealth(md), ignored);
+  if (healthAsked && (Date.now() - healthAsked.at > 15 * 60000 || (report && report.checked !== healthAsked.checked))) healthAsked = null;
+  const left = Object.keys(ignored).length;
+  const run = h('button', { class: 'btn', type: 'button', disabled: !!healthAsked, onclick: async (e) => {
+    e.target.disabled = true;
+    try {
+      await core.requestHealthCheck(repo);
+      healthAsked = { at: Date.now(), checked: report ? report.checked : '' };
+      e.target.textContent = 'Check requested';
+      toast('The check runs on GitHub. Results appear here in a few minutes.', 6000);
+    } catch (err) { e.target.disabled = false; toast(`Could not send: ${err.message}`, 7000); }
+  } }, healthAsked ? 'Check requested' : 'Run the check now');
+  const card = (item) => {
+    const box = h('div', { class: 'qcard health' },
+      h('p', {}, h('b', {}, item.kind)),
+      renderMarkdown(item.text, 'wiki/health.md'),
+      h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', onclick: async (e) => {
+        e.target.disabled = true;
+        try {
+          await core.ignoreFinding(repo, item);
+          box.remove();
+          toast('Left as is. It will not be raised again.');
+        } catch (err) { e.target.disabled = false; toast(`Could not save: ${err.message}`, 7000); }
+      } }, 'Leave as is')));
+    return box;
+  };
+  fill(view,
+    crumb(),
+    h('h1', {}, 'Health check'),
+    h('p', { class: 'muted' }, report
+      ? `Checked ${report.checked}. Runs every Monday morning. ` + (report.count ? 'Follow a link to fix something; once fixed, it drops off at the next check.' : 'Nothing to look at.')
+      : 'The check has not run yet. It runs every Monday morning.'),
+    report && report.basicOnly ? h('p', { class: 'help' }, 'The model check did not run last time. Anything it found in an earlier check is still listed.') : null,
+    healthAsked ? h('p', { class: 'help pending' }, 'A check was requested. Results appear here in a few minutes.') : null,
+    report ? report.groups.map((g) => [h('h2', {}, g.slug ? h('a', { href: '#/p/' + g.slug }, g.name) : g.name), g.items.map(card)]) : null,
+    h('div', { class: 'row' }, run),
+    left ? h('p', { class: 'muted' }, `${left} item${left > 1 ? 's' : ''} left as they are.`) : null);
+}
+
 async function questions() {
   const o = await refreshChrome();
   const pending = new Set(pendingRequests().map((p) => p.question));
@@ -976,6 +1022,7 @@ async function route(scroll = true) {
   try {
     if (hash === '') await home();
     else if (hash === 'q') await questions();
+    else if (hash === 'review') await review();
     else if (hash === 'new') await newProject();
     else if (hash === 'add' || hash.startsWith('add/')) await addNote(hash.slice(4));
     else if (hash.startsWith('p/')) await project(hash.slice(2));
