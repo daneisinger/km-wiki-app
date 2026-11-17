@@ -635,6 +635,27 @@ export async function ignoreFinding(repo, item, date = today()) {
   if (out == null) throw new Error('The list changed on GitHub at the same moment. Try again.');
 }
 
+// ---------- instructions ----------
+
+/** The id the script gives the record of an instruction sent now, so the app can link to it straight away. */
+export function instructionId(now = new Date()) {
+  const iso = now.toISOString();
+  return `${iso.slice(0, 10)}-instruction-${iso.slice(11, 19).replace(/:/g, '')}`;
+}
+
+/**
+ * Send the owner's instruction about a project. `finding` is the health check item it replies to, if any.
+ * The text model turns it into changes on GitHub. Returns the id of the record that will list them.
+ */
+export async function instructWiki(repo, slug, instruction, finding = null) {
+  const text = String(instruction || '').trim();
+  if (!text) throw new Error('Type the instruction first.');
+  const record = instructionId();
+  await sendRequest(repo, { type: 'instruct', slug, instruction: text, record,
+    finding: finding ? { key: finding.key, kind: finding.kind, text: finding.text } : null });
+  return record;
+}
+
 /** Ask the workflow to run the health check now. */
 export const requestHealthCheck = (repo) => sendRequest(repo, { type: 'health' });
 

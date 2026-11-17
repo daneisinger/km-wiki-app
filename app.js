@@ -3,7 +3,7 @@ import * as core from './core.js';
 import { marked } from './vendor/marked.esm.js';
 
 // Shown under Settings so you can tell which copy a device is running. Raise it with every change to the app.
-const APP_VERSION = '2026-11-17.1';
+const APP_VERSION = '2026-11-17.2';
 const APP_FILES = ['./', 'index.html', 'app.js', 'core.js', 'app.css', 'vendor/marked.esm.js', 'manifest.webmanifest'];
 
 const view = document.getElementById('view');
@@ -233,6 +233,9 @@ async function project(slug) {
     h('h2', {}, 'Pages'),
     h('div', { class: 'row' }, pages.map((f, i) => h('a', { class: 'btn', href: '#/page/' + f }, titles[i])),
       h('a', { class: 'btn primary', href: '#/add/' + slug }, 'Add a note to this project')),
+    h('h2', {}, 'Tell the wiki'),
+    h('p', { class: 'muted' }, 'Say what to change in this project in your own words: tasks, log, description, glossary or decisions. The model makes the changes and lists them.'),
+    instructBox(slug, 'project:' + slug, null, 'For example: T-030 is done; the clevis is only on the anchor end'),
   );
 }
 
@@ -629,6 +632,36 @@ async function page(path) {
   );
 }
 
+const instructed = new Map();   // health item key or 'project:<slug>' -> [record ids] sent from this device
+
+/** A box for telling the model what to change, and links to the results of what was sent. */
+function instructBox(slug, key, finding, placeholder, extra = null) {
+  const box = h('div', { class: 'instruct' });
+  let draft = '';
+  const draw = () => {
+    const sent = instructed.get(key) || [];
+    const area = h('textarea', { rows: 2, placeholder, 'aria-label': 'Instruction', oninput: (e) => { draft = e.target.value; } }, draft);
+    fill(box,
+      finding && sent.length ? null : area,
+      sent.map((id) => h('p', { class: 'help pending' }, 'Instruction sent. ',
+        h('a', { href: '#/page/raw/' + id + '/source.md' }, 'What changed'), ' shows once GitHub has applied it.' + (finding ? ' This item drops off when the check confirms the fix.' : ''))),
+      h('div', { class: 'row' }, finding && sent.length ? null : h('button', { class: 'btn primary', type: 'button', onclick: async (e) => {
+        if (!draft.trim()) { toast('Type the instruction first.'); return; }
+        e.target.disabled = true;
+        try {
+          const id = await core.instructWiki(repo, slug, draft, finding);
+          instructed.set(key, [...sent, id]);
+          draft = '';
+          toast('Sent. The changes are made on GitHub within a few minutes.', 6000);
+          refreshChrome().catch(() => {});
+        } catch (err) { toast(`Could not send: ${err.message}`, 7000); }
+        draw();
+      } }, 'Send instruction'), extra));
+  };
+  draw();
+  return box;
+}
+
 let healthAsked = null;   // {at, checked}: when "Run the check now" was used, and the report date then
 
 async function review() {
@@ -647,17 +680,20 @@ async function review() {
     } catch (err) { e.target.disabled = false; toast(`Could not send: ${err.message}`, 7000); }
   } }, healthAsked ? 'Check requested' : 'Run the check now');
   const card = (item) => {
-    const box = h('div', { class: 'qcard health' },
+    let box = null;
+    const leave = h('button', { class: 'btn', type: 'button', onclick: async (e) => {
+      e.target.disabled = true;
+      try {
+        await core.ignoreFinding(repo, item);
+        box.remove();
+        toast('Left as is. It will not be raised again.');
+      } catch (err) { e.target.disabled = false; toast(`Could not save: ${err.message}`, 7000); }
+    } }, 'Leave as is');
+    box = h('div', { class: 'qcard health' },
       h('p', {}, h('b', {}, item.kind)),
       renderMarkdown(item.text, 'wiki/health.md'),
-      h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', onclick: async (e) => {
-        e.target.disabled = true;
-        try {
-          await core.ignoreFinding(repo, item);
-          box.remove();
-          toast('Left as is. It will not be raised again.');
-        } catch (err) { e.target.disabled = false; toast(`Could not save: ${err.message}`, 7000); }
-      } }, 'Leave as is')));
+      item.project ? instructBox(item.project, item.key, item, 'Tell the model how to fix it, for example: drop T-022, it is the same as T-013', leave)
+        : h('div', { class: 'row' }, leave));
     return box;
   };
   fill(view,
@@ -1046,6 +1082,7 @@ setInterval(async () => {
   if (!repo || document.hidden) return;
   if (/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement && document.activeElement.tagName)) return;
   if ((holdRedraw && view.querySelector('.taskedit')) || view.querySelector('.fixedit')) return;   // something is being edited: do not redraw under it
+  if ([...view.querySelectorAll('.instruct textarea')].some((t) => t.value.trim())) return;   // an instruction is being typed
   try {
     await repo.tree(true);
     const now = await signature();

@@ -153,3 +153,6 @@ button.btn.small{font-size:13px;padding:6px 10px}
 .fixable .zoombox{max-width:560px}
 .qcard.health{border-left-color:var(--accent)}
 .qcard.health .md>:first-child{margin-top:0}
+.instruct{margin:8px 0}
+.instruct textarea{min-height:52px}
+.instruct .row{margin-top:6px}
