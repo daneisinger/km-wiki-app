@@ -575,6 +575,16 @@ export function noteParts(md) {
   return { meta, pre: body.slice(0, heads[0].index).trim(), sections, notes: notesAt != null ? body.slice(notesAt).trim() : '' };
 }
 
+/** Sections of a project page that keep their own form: the script writes them, or they have editors of their own. */
+export const FIXED_SECTIONS = ['Tasks', 'Glossary', 'People and suppliers', 'Pages'];
+
+/**
+ * Add, change, rename or remove one of the owner's sections on a project page.
+ * `was` is its current name ('' to add one); `name` its name after the change.
+ */
+export const correctSection = (repo, slug, { was = '', name, text = '', remove = false }) =>
+  sendRequest(repo, { type: 'correct', target: 'section', slug, was, name: name || was, text, remove });
+
 export const correctDescription = (repo, slug, text) =>
   sendRequest(repo, { type: 'correct', target: 'description', slug, text });
 

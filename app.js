@@ -3,7 +3,7 @@ import * as core from './core.js';
 import { marked } from './vendor/marked.esm.js';
 
 // Shown under Settings so you can tell which copy a device is running. Raise it with every change to the app.
-const APP_VERSION = '2026-11-17.3';
+const APP_VERSION = '2026-11-18.1';
 const APP_FILES = ['./', 'index.html', 'app.js', 'core.js', 'app.css', 'vendor/marked.esm.js', 'manifest.webmanifest'];
 
 const view = document.getElementById('view');
@@ -272,41 +272,110 @@ const pendingNote = () => h('p', { class: 'help pending' }, 'Pending: GitHub is 
 function projectPage(slug, md) {
   const path = `wiki/projects/${slug}/project.md`;
   const parts = core.projectParts(md);
-  return h('div', {},
-    parts.pre ? renderMarkdown(parts.pre, path) : null,
-    parts.sections.map((s) => (s.name === 'Description' ? descriptionBlock(slug, s.text, path)
-      : s.name === 'Glossary' ? tableBlock(slug, 'glossary', s, path)
+  const names = parts.sections.map((s) => s.name);
+  const fixed = (n) => core.FIXED_SECTIONS.includes(n);
+  // Sections added from this device that GitHub has not written yet.
+  const added = pendingFixes(`sections:${slug}`).filter((f) => !names.some((n) => n.toLowerCase() === f.name.toLowerCase()));
+  const adder = addSectionBlock(slug, () => [...names, ...added.map((f) => f.name)]);
+  const out = [parts.pre ? renderMarkdown(parts.pre, path) : null];
+  let placed = false;
+  const place = () => { if (!placed) { placed = true; out.push(added.map((f) => sectionBlock(slug, f.name, f.text, path, { fresh: true })), adder); } };
+  for (const s of parts.sections) {
+    if (['Glossary', 'People and suppliers', 'Pages'].includes(s.name)) place();
+    out.push(s.name === 'Glossary' ? tableBlock(slug, 'glossary', s, path)
       : s.name === 'People and suppliers' ? tableBlock(slug, 'people', s, path)
-      : renderMarkdown(`## ${s.name}\n\n${s.text}`, path))));
+      : fixed(s.name) ? renderMarkdown(`## ${s.name}\n\n${s.text}`, path)
+      : sectionBlock(slug, s.name, s.text, path, { names }));
+  }
+  place();
+  return h('div', {}, out);
 }
 
-function descriptionBlock(slug, text, path) {
-  const box = h('section', { class: 'fixable' });
-  let draft = null;   // the text being edited, or null when not editing
+const sectionKey = (slug, name) => `section:${slug}:${name.toLowerCase()}`;
+
+function addSectionBlock(slug, existing) {
+  const box = h('div', { class: 'addsection' });
+  let draft = null;   // {name, text} while adding
   const draw = () => {
-    const pending = pendingFixes(`desc:${slug}`).pop();
-    const shown = pending ? pending.text : text;
-    const area = draft == null ? null : h('textarea', { 'aria-label': 'Description', rows: Math.max(4, draft.split('\n').length + 2), oninput: (e) => { draft = e.target.value; } }, draft);
-    fill(box,
-      h('h2', {}, 'Description', draft == null ? editButton('Edit the description', () => { draft = core.plainText(shown); draw(); box.querySelector('textarea').focus(); }) : null),
-      draft == null ? [renderMarkdown(shown, path), pending ? pendingNote() : null]
-        : h('form', { class: 'fixedit', onsubmit: async (e) => {
-          e.preventDefault();
-          const next = draft.trim();
-          if (!next) { toast('The description cannot be empty.'); return; }
-          if (next === core.plainText(shown)) { draft = null; draw(); return; }
-          if (await sendFix(e.submitter || e.target.querySelector('button'), `desc:${slug}`, { text: next }, () => core.correctDescription(repo, slug, next))) draft = null;
-          draw();
-        } },
-          area,
-          h('p', { class: 'help' }, 'A blank line starts a new paragraph. Paragraphs you leave alone keep their sources.'),
-          h('div', { class: 'row' },
-            h('button', { class: 'btn primary', type: 'submit' }, 'Save'),
-            h('button', { class: 'btn', type: 'button', onclick: () => { draft = null; draw(); } }, 'Cancel'))));
+    if (!draft) {
+      fill(box, h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', onclick: () => { draft = { name: '', text: '' }; draw(); box.querySelector('input').focus(); } }, 'Add a section')));
+      return;
+    }
+    fill(box, h('form', { class: 'fixedit', onsubmit: async (e) => {
+      e.preventDefault();
+      const name = draft.name.replace(/\s+/g, ' ').replace(/^#+\s*/, '').trim();
+      const text = draft.text.trim();
+      if (!name) { toast('Give the section a name.'); return; }
+      if (core.FIXED_SECTIONS.concat('Description').some((n) => n.toLowerCase() === name.toLowerCase())) { toast(`"${name}" is a built-in section. Choose another name.`); return; }
+      if (existing().some((n) => n.toLowerCase() === name.toLowerCase())) { toast(`There is already a section called "${name}".`); return; }
+      if (!text) { toast('Write something in the section first.'); return; }
+      if (await sendFix(e.submitter || e.target.querySelector('button'), `sections:${slug}`, { name, text }, () => core.correctSection(repo, slug, { was: '', name, text }))) {
+        draft = null;
+        route(false);   // show the new section in its place, marked as pending
+      }
+    } },
+      h('label', {}, 'Section name', h('input', { type: 'text', value: draft.name, placeholder: 'For example: Site contacts', oninput: (e) => { draft.name = e.target.value; } })),
+      h('label', {}, 'Text', h('textarea', { rows: 5, oninput: (e) => { draft.text = e.target.value; } }, draft.text)),
+      h('p', { class: 'help' }, 'A blank line starts a new paragraph. Lists and ### subheadings work. The model reads this section when it files notes, but does not change it.'),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn primary', type: 'submit' }, 'Add section'),
+        h('button', { class: 'btn', type: 'button', onclick: () => { draft = null; draw(); } }, 'Cancel'))));
   };
   draw();
   return box;
 }
+
+/**
+ * One editable section of a project page. Description can only be edited; sections the owner
+ * added can also be renamed and removed. `fresh` marks one that GitHub has not written yet.
+ */
+function sectionBlock(slug, name, text, path, { names = [], fresh = false } = {}) {
+  const isDesc = name === 'Description';
+  const key = isDesc ? `desc:${slug}` : sectionKey(slug, name);
+  const box = h('section', { class: 'fixable' });
+  let draft = null;   // {name, text, confirmRemove} while editing
+  const draw = () => {
+    const pending = pendingFixes(key).pop();
+    if (pending && pending.remove) { fill(box, h('p', { class: 'help pending' }, `Removing the section "${name}". GitHub is applying this change.`)); return; }
+    const shownName = pending && pending.name ? pending.name : name;
+    const shown = pending ? pending.text : text;
+    const send = (button, data) => sendFix(button, key, data, () => (isDesc ? core.correctDescription(repo, slug, data.text)
+      : core.correctSection(repo, slug, { was: name, name: data.name || name, text: data.text || '', remove: !!data.remove })));
+    if (draft == null) {
+      fill(box,
+        h('h2', {}, shownName, fresh || pending ? null : editButton(isDesc ? 'Edit the description' : `Edit ${name}`, () => { draft = { name, text: core.plainText(shown) }; draw(); box.querySelector('textarea').focus(); })),
+        renderMarkdown(shown, path), fresh || pending ? pendingNote() : null);
+      return;
+    }
+    fill(box,
+      h('h2', {}, isDesc ? 'Description' : 'Edit section'),
+      h('form', { class: 'fixedit', onsubmit: async (e) => {
+        e.preventDefault();
+        const next = draft.text.trim();
+        const newName = isDesc ? name : draft.name.replace(/\s+/g, ' ').replace(/^#+\s*/, '').trim();
+        if (!next) { toast(isDesc ? 'The description cannot be empty.' : 'The section is empty. To delete it, use Remove.'); return; }
+        if (!newName) { toast('Give the section a name.'); return; }
+        if (newName.toLowerCase() !== name.toLowerCase() && (core.FIXED_SECTIONS.concat('Description').concat(names).some((n) => n.toLowerCase() === newName.toLowerCase()))) { toast(`There is already a section called "${newName}".`); return; }
+        if (next === core.plainText(shown) && newName === name) { draft = null; draw(); return; }
+        if (await send(e.submitter || e.target.querySelector('button'), { name: newName, text: next })) draft = null;
+        draw();
+      } },
+        isDesc ? null : h('label', {}, 'Section name', h('input', { type: 'text', value: draft.name, oninput: (e) => { draft.name = e.target.value; } })),
+        h('textarea', { 'aria-label': isDesc ? 'Description' : `Text of ${name}`, rows: Math.max(4, draft.text.split('\n').length + 2), oninput: (e) => { draft.text = e.target.value; } }, draft.text),
+        h('p', { class: 'help' }, 'A blank line starts a new paragraph. Paragraphs you leave alone keep their sources.'),
+        h('div', { class: 'row' },
+          h('button', { class: 'btn primary', type: 'submit' }, 'Save'),
+          h('button', { class: 'btn', type: 'button', onclick: () => { draft = null; draw(); } }, 'Cancel'),
+          isDesc ? null : h('button', { class: 'btn danger', type: 'button', onclick: async (e) => {
+            if (!draft.confirmRemove) { draft.confirmRemove = true; e.target.textContent = 'Tap again to remove'; return; }
+            if (await send(e.target, { remove: true })) draft = null;
+            draw();
+          } }, 'Remove section'))));
+  };
+  draw();
+  return box;
+}
+
 
 /** The Glossary or the People and suppliers table, with each row editable and a way to add one. */
 function tableBlock(slug, target, section, path) {
