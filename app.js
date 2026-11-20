@@ -87,7 +87,11 @@ function renderMarkdown(md, path) {
     const href = a.getAttribute('href');
     if (/^[a-z]+:/i.test(href)) { a.target = '_blank'; a.rel = 'noopener'; continue; }
     if (href.startsWith('#')) continue;
-    if (!/\.md(#.*)?$/i.test(href)) { a.removeAttribute('href'); continue; }   // originals are not viewable in the app yet
+    if (!/\.md(#.*)?$/i.test(href)) {   // a file kept with a note (an email attachment, an original): fetched when tapped
+      const file = core.resolvePath(path, href.split('#')[0]);
+      if (file.startsWith('raw/')) { a.setAttribute('href', '#'); a.dataset.file = file; } else a.removeAttribute('href');
+      continue;
+    }
     a.setAttribute('href', '#/page/' + core.resolvePath(path, href));
     if (a.textContent === 'src') a.className = 'src';
   }
@@ -106,6 +110,7 @@ function renderMarkdown(md, path) {
   const box = h('div', { class: 'md' });
   box.append(...doc.body.childNodes);
   loadImages(box);
+  for (const a of box.querySelectorAll('a[data-file]')) a.addEventListener('click', (e) => { e.preventDefault(); openFile(a.dataset.file); });
   return box;
 }
 
@@ -114,6 +119,22 @@ const imageUrls = new Map();   // repo path -> blob URL, so an image is fetched 
 async function imageUrl(path) {
   if (!imageUrls.has(path)) imageUrls.set(path, URL.createObjectURL(await (await repo.raw(path)).blob()));
   return imageUrls.get(path);
+}
+
+/** Download a file from the repo (the repo is private, so a plain link would not work) and hand it to the browser. */
+async function openFile(path) {
+  try {
+    const url = URL.createObjectURL(await (await repo.raw(path)).blob());
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = path.split('/').pop();
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (e) {
+    toast(`Could not open the file: ${e.message}`, 7000);
+  }
 }
 
 async function loadImages(box) {
@@ -1084,7 +1105,7 @@ async function shrinkImage(file) {
 
 async function addNote(presetSlug) {
   await refreshChrome();
-  const file = h('input', { type: 'file', id: 'note-file', accept: 'image/*,application/pdf,.txt,.md' });
+  const file = h('input', { type: 'file', id: 'note-file', accept: 'image/*,application/pdf,.txt,.md,.eml,message/rfc822' });
   const typed = h('textarea', { id: 'note-text', placeholder: 'Or type a note here' });
   const proj = h('select', { id: 'note-project' },
     h('option', { value: '' }, 'Let the AI decide'),
@@ -1121,8 +1142,8 @@ async function addNote(presetSlug) {
   fill(view, 
     crumb({ href: '#/', label: 'Projects' }, { label: 'Add note' }),
     h('h1', {}, 'Add a note'),
-    h('label', { for: 'note-file' }, 'Photo, screenshot, PDF or text file'), file,
-    h('p', { class: 'help' }, 'On a phone this offers the camera, your photo library and Files.'),
+    h('label', { for: 'note-file' }, 'Photo, screenshot, PDF, text file or saved email (.eml)'), file,
+    h('p', { class: 'help' }, 'On a phone this offers the camera, your photo library and Files. An email keeps its attachments: save it as a .eml file (Gmail: ⋮ > Download message; Outlook.com: ⋯ menu, then save or download).'),
     h('label', { for: 'note-text' }, 'Typed note'), typed,
     h('label', { for: 'note-project' }, 'Project'), proj,
     h('label', { for: 'note-caption' }, 'Caption (optional)'), caption,
