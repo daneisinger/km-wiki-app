@@ -12,7 +12,7 @@ Open the Pages address for this repo. The first screen asks for the GitHub user,
 
 These files are a copy of the `app/` folder in the private wiki repo, which is where changes are made. Do not edit them here; they are replaced when the copy is refreshed.
 
-Copied from commit `ca12a01`.
+Copied from commit `9c51a7e`.
 
 ## Files
 

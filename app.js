@@ -3,7 +3,7 @@ import * as core from './core.js';
 import { marked } from './vendor/marked.esm.js';
 
 // Shown under Settings so you can tell which copy a device is running. Raise it with every change to the app.
-const APP_VERSION = '2026-11-18.1';
+const APP_VERSION = '2026-11-20.1';
 const APP_FILES = ['./', 'index.html', 'app.js', 'core.js', 'app.css', 'vendor/marked.esm.js', 'manifest.webmanifest'];
 
 const view = document.getElementById('view');
@@ -775,7 +775,7 @@ async function askScreen(slug) {
   const trail = [{ href: '#/', label: 'Projects' }, ...(name ? [{ href: '#/p/' + slug, label: name }] : []), { label: 'Ask' }];
   if (!ai.key) {
     fill(view, crumb(...trail), h('h1', {}, title),
-      h('p', {}, 'Ask sends your question and the wiki to a model through OpenRouter, straight from this device. It needs an OpenRouter key, stored only in this browser.'),
+      h('p', {}, 'Ask sends your question and the wiki to a model straight from this device. It needs an Anthropic API key (or an OpenRouter key), stored only in this browser.'),
       h('div', { class: 'row' }, h('a', { class: 'btn primary', href: '#/setup' }, 'Add the key in Settings')));
     return;
   }
@@ -796,7 +796,7 @@ async function askScreen(slug) {
       const [settings, system] = await Promise.all([core.askSettings(repo), repo.text('tools/prompts/ask.md')]);
       const context = await core.askContext(repo, slug || null, settings.maxChars);
       const out = await core.askModel({ key: ai.key, model: ai.model || settings.model, system: system || ASK_FALLBACK,
-        context: context.text, turns: thread.turns, scope: name });
+        context: context.text, turns: thread.turns, scope: name, anthropic: settings.anthropic });
       turn.a = out.text; turn.cost = out.cost; turn.dropped = context.dropped;
       rememberAsk(scope, thread.turns);
     } catch (e) { turn.error = e.message || String(e); }
@@ -1221,9 +1221,9 @@ function askSettingsSection() {
   } }, 'Save');
   return h('section', { class: 'about' },
     h('h2', {}, 'Ask'),
-    h('p', { class: 'help' }, 'Ask calls a model through OpenRouter from this device. The key is stored only in this browser. On openrouter.ai, under Keys, you can make a key just for this and give it a spending limit.'),
-    field('s-orkey', 'OpenRouter key', ai.key || '', 'password'),
-    field('s-ormodel', 'Model (optional)', ai.model || '', 'text', 'Leave empty to use ask_model from tools/ingest_config.json (Claude Haiku 5.5 unless changed). For example anthropic/claude-sonnet-5.5 for harder questions, at about three times the cost.'),
+    h('p', { class: 'help' }, 'Ask calls a model from this device. The key is stored only in this browser. An Anthropic key (starting sk-ant-, from console.anthropic.com) calls Claude directly; any other key is used with OpenRouter. Making a key just for this lets you revoke it on its own.'),
+    field('s-orkey', 'API key (Anthropic or OpenRouter)', ai.key || '', 'password'),
+    field('s-ormodel', 'Model (optional)', ai.model || '', 'text', 'Leave empty to use ask_model from tools/ingest_config.json (Claude Haiku 5.5 unless changed). For example anthropic/claude-sonnet-5.5 for harder questions, at a higher cost.'),
     h('div', { class: 'row' }, save));
 }
 

@@ -647,8 +647,8 @@ export async function ignoreFinding(repo, item, date = today()) {
 
 // ---------- ask ----------
 //
-// Questions are answered by a model called straight from the device, with the owner's OpenRouter
-// key, so no server is needed. The whole wiki goes in one call while it is small enough:
+// Questions are answered by a model called straight from the device, with the owner's key for
+// Anthropic's API (sk-ant-...) or for OpenRouter, so no server is needed. The whole wiki goes in one call while it is small enough:
 // every wiki page and every note's transcription, each headed by its path so answers can link to it.
 
 export const ASK_DEFAULTS = { model: 'anthropic/claude-haiku-5.5', maxChars: 600000, base: 'https://openrouter.ai/api/v1' };
@@ -657,7 +657,25 @@ export const ASK_DEFAULTS = { model: 'anthropic/claude-haiku-5.5', maxChars: 600
 export async function askSettings(repo) {
   let cfg = {};
   try { cfg = JSON.parse((await repo.text('tools/ingest_config.json')) || '{}'); } catch { /* defaults */ }
-  return { model: cfg.ask_model || ASK_DEFAULTS.model, maxChars: Number(cfg.ask_max_chars) || ASK_DEFAULTS.maxChars };
+  return { model: cfg.ask_model || ASK_DEFAULTS.model, maxChars: Number(cfg.ask_max_chars) || ASK_DEFAULTS.maxChars,
+    anthropic: cfg.anthropic || {} };
+}
+
+/** True for a key to Anthropic's own API; any other key is taken to be an OpenRouter key. */
+export const isAnthropicKey = (key) => /^sk-ant-/.test(String(key || '').trim());
+
+/** anthropic/claude-haiku-5.5 -> claude-haiku-5-5. Names already in Anthropic's form are left alone. */
+export const anthropicModel = (model) => (model.startsWith('anthropic/') ? model.slice(10).replace(/\./g, '-') : model);
+
+/** Estimated cost in USD of an Anthropic reply, from its token counts and the prices in the config. */
+export function anthropicCost(model, usage = {}, cfg = {}) {
+  const p = (cfg.prices || {})[model];
+  if (!p) return 0;
+  const inp = usage.input_tokens || 0, out = usage.output_tokens || 0;
+  const write = usage.cache_creation_input_tokens || 0, read = usage.cache_read_input_tokens || 0;
+  const long = (cfg.long_prompt || {})[model];
+  const m = long && inp + write + read > long.over_tokens ? long.multiplier : 1;
+  return m * (inp * p.input + out * p.output + write * (p.cache_write ?? p.input) + read * (p.cache_read ?? p.input)) / 1e6;
 }
 
 /** Paths sent as context: wiki pages and note transcriptions. Generated lists and the health report are left out. */
@@ -703,35 +721,61 @@ export async function askContext(repo, slug = null, maxChars = ASK_DEFAULTS.maxC
  * The wiki goes first in a block marked for caching, so a follow-up within a few minutes costs less.
  * Returns {text, cost}.
  */
-export async function askModel({ key, model, system, context, turns, base = ASK_DEFAULTS.base, scope = '', fetchImpl = fetch }) {
-  if (!key) throw new Error('Ask needs an OpenRouter key. Add it under Settings.');
-  const first = { role: 'user', content: [
+export async function askModel({ key, model, system, context, turns, base = ASK_DEFAULTS.base, scope = '', anthropic = {}, fetchImpl = fetch }) {
+  if (!key) throw new Error('Ask needs an API key. Add it under Settings.');
+  const viaAnthropic = isAnthropicKey(key);
+  const who = viaAnthropic ? 'Anthropic' : 'OpenRouter';
+  const first = [
     { type: 'text', text: `# The wiki\n\n${context}`, cache_control: { type: 'ephemeral' } },
     { type: 'text', text: (scope ? `Asked from the page of the project: ${scope}.\n\n` : '') + `# Question\n\n${turns[0].q}` },
-  ] };
-  const messages = [{ role: 'system', content: system }, first];
-  turns.slice(0, -1).forEach((t, i) => { messages.push({ role: 'assistant', content: t.a || '' }, { role: 'user', content: turns[i + 1].q }); });
-  const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${key}`, 'X-Title': 'km-wiki ask' };
-  if (typeof location !== 'undefined' && location.origin && location.origin.startsWith('http')) headers['HTTP-Referer'] = location.origin;
+  ];
+  const later = [];
+  turns.slice(0, -1).forEach((t, i) => { later.push({ role: 'assistant', content: t.a || '' }, { role: 'user', content: turns[i + 1].q }); });
+  let url, headers, body;
+  if (viaAnthropic) {
+    model = anthropicModel(model);
+    url = 'https://api.anthropic.com/v1/messages';
+    headers = { 'Content-Type': 'application/json', 'x-api-key': key.trim(), 'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true' };   // the key is the owner's own, kept in this browser
+    body = { model, max_tokens: 4000, system, messages: [{ role: 'user', content: first }, ...later] };
+    if ((anthropic.thinking || {})[model]) body.thinking = anthropic.thinking[model];
+    if ((anthropic.effort || {})[model]) body.output_config = { effort: anthropic.effort[model] };
+  } else {
+    url = `${base.replace(/\/$/, '')}/chat/completions`;
+    headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${key}`, 'X-Title': 'km-wiki ask' };
+    if (typeof location !== 'undefined' && location.origin && location.origin.startsWith('http')) headers['HTTP-Referer'] = location.origin;
+    body = { model, temperature: 0.2, max_tokens: 4000, usage: { include: true },
+      messages: [{ role: 'system', content: system }, { role: 'user', content: first }, ...later] };
+  }
   let res;
   try {
-    res = await fetchImpl(`${base.replace(/\/$/, '')}/chat/completions`, { method: 'POST', headers,
-      body: JSON.stringify({ model, temperature: 0.2, max_tokens: 4000, usage: { include: true }, messages }) });
-  } catch (e) { throw new Error(`Could not reach OpenRouter (${e.message}). Check the connection.`); }
+    res = await fetchImpl(url, { method: 'POST', headers, body: JSON.stringify(body) });
+  } catch (e) { throw new Error(`Could not reach ${who} (${e.message}). Check the connection.`); }
   let data = {};
   try { data = await res.json(); } catch { /* handled below */ }
   if (!res.ok || data.error) {
     const msg = (data.error && (data.error.message || JSON.stringify(data.error))) || `HTTP ${res.status}`;
-    if (res.status === 401) throw new Error('OpenRouter refused the key. Check it under Settings.');
-    if (res.status === 402) throw new Error('The OpenRouter account is out of credit.');
-    throw new Error(`OpenRouter: ${msg}`.slice(0, 300));
+    if (res.status === 401) throw new Error(`${who} refused the key. Check it under Settings.`);
+    if (res.status === 402) throw new Error(`The ${who} account is out of credit.`);
+    if (viaAnthropic && /credit balance/i.test(msg)) throw new Error('The Anthropic account is out of credit.');
+    throw new Error(`${who}: ${msg}`.slice(0, 300));
   }
-  const choice = (data.choices || [])[0] || {};
-  let text = (choice.message || {}).content || '';
-  if (Array.isArray(text)) text = text.map((x) => x.text || '').join('');
+  let text, cut, cost;
+  if (viaAnthropic) {
+    if (data.stop_reason === 'refusal') throw new Error('The model declined to answer this question.');
+    text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text || '').join('');
+    cut = data.stop_reason === 'max_tokens';
+    cost = anthropicCost(model, data.usage || {}, anthropic);
+  } else {
+    const choice = (data.choices || [])[0] || {};
+    text = (choice.message || {}).content || '';
+    if (Array.isArray(text)) text = text.map((x) => x.text || '').join('');
+    cut = choice.finish_reason === 'length';
+    cost = (data.usage || {}).cost || 0;
+  }
   if (!text.trim()) throw new Error('The model gave an empty answer. Try again.');
-  if (choice.finish_reason === 'length') text += '\n\n*(The answer was cut off at its length limit.)*';
-  return { text, cost: (data.usage || {}).cost || 0 };
+  if (cut) text += '\n\n*(The answer was cut off at its length limit.)*';
+  return { text, cost };
 }
 
 /** The id the script gives a saved answer, chosen now so the app can link to it. */
