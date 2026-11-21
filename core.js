@@ -175,6 +175,11 @@ export class Repo {
 
 // ---------- registry ----------
 
+// Every wiki entry is a topic of one of these kinds. Folders, files and request fields still say
+// "project" for all kinds, so the iPhone Shortcut, the Supernote plugin and the Gmail script keep working.
+export const KINDS = [['general', 'General'], ['project', 'Project'], ['profile', 'Profile']];
+export const kindLabel = (kind) => (KINDS.find(([k]) => k === kind) || KINDS[1])[1];
+
 export function parseRegistry(yaml) {
   const out = [];
   for (const block of yaml.split(/^\s*- slug:/m).slice(1)) {
@@ -182,10 +187,12 @@ export function parseRegistry(yaml) {
     const name = clean.match(/^\s*name:\s*(.+)$/m);
     const aliases = clean.match(/^\s*aliases:\s*(\[.*\])\s*$/m);
     const status = clean.match(/^\s*status:\s*(.+)$/m);
+    const kind = (clean.match(/^\s*kind:\s*(\S+)/m) || [])[1];
     let list = [];
     try { list = aliases ? JSON.parse(aliases[1]) : []; } catch { /* leave empty */ }
     const slug = clean.trim().split(/\s+/)[0];
-    out.push({ slug, name: name ? name[1].trim().replace(/^"|"$/g, '') : slug, aliases: list, status: status ? status[1].trim() : '' });
+    out.push({ slug, name: name ? name[1].trim().replace(/^"|"$/g, '') : slug, aliases: list, status: status ? status[1].trim() : '',
+      kind: KINDS.some(([k]) => k === kind) ? kind : 'project' });
   }
   return out;
 }
@@ -406,7 +413,7 @@ export function addTask(md, group, text, { due, focus } = {}, date = today()) {
 
 /**
  * Open questions from questions.md, each classified so a screen can offer the right control:
- *   project  - "Which project does X belong to?"  -> pick a project
+ *   project  - "Which topic does X belong to?"    -> pick a topic (older questions say "project")
  *   unknown  - lines for a project that does not exist -> create it, or ignore the lines
  *   decision - an inferred decision to confirm     -> yes / no, with a reason
  *   text     - anything else                        -> free text
@@ -427,7 +434,7 @@ export function parseQuestions(md) {
     const q = { n: Number(m[1]), raw, note, kind: 'text' };
     q.project = (raw.match(/\]\(projects\/([^/)]+)\//) || [])[1] || null;
     q.text = raw.replace(/\s*\[(src|project)\]\([^)]*\)/g, '').replace(/\s*To (create it|file the whole note)[^`]*`[^`]*`\.?.*$/, '').trim();
-    const unknown = raw.match(/has lines for "([^"]+)", which is not a known project/);
+    const unknown = raw.match(/has lines for "([^"]+)", which is not a known (?:project|topic)/);
     const decision = raw.match(/\[decision\]\(([^)]+)\)/);
     const loose = raw.match(/has lines with no clear project \(([^)]+)\)/);
     if (loose) {
@@ -437,7 +444,7 @@ export function parseQuestions(md) {
       q.text = q.text.replace(/ \(group \d+\)/, '').replace(/\s*Best guess: [^.]+\./, '');
     } else if (/You edited this task by hand/.test(raw)) {
       q.kind = 'reword';   // a corrected wording held back because the owner had edited the task
-    } else if (/^Which project does /.test(raw)) {
+    } else if (/^Which (?:project|topic) does /.test(raw)) {
       q.kind = 'project';
       q.guess = (raw.match(/Best guess: ([^.]+)\./) || [])[1] || null;
     } else if (unknown) {
@@ -485,11 +492,14 @@ export const answerQuestion = (repo, q, choice, answer) =>
 /** File a note under a project. Pass `newProject` ({name, desc}) with an empty `slug` to create the project first. */
 export const fileNote = (repo, q, slug, newProject) =>
   sendRequest(repo, { type: 'file', question: q.raw, note: q.note, slug: slug || '',
-    ...(newProject ? { new_project: { name: newProject.name, desc: newProject.desc || '' } } : {}),
+    ...(newProject ? { new_project: { name: newProject.name, desc: newProject.desc || '', kind: newProject.kind || 'project' } } : {}),
     ...(q.kind === 'loose' ? { label: q.label } : {}) });
 
-export const createProject = (repo, { name, aliases, desc }, q) =>
-  sendRequest(repo, { type: 'new-project', question: q ? q.raw : '', name, aliases: aliases || [], desc: desc || '' });
+export const createProject = (repo, { name, aliases, desc, kind }, q) =>
+  sendRequest(repo, { type: 'new-project', question: q ? q.raw : '', name, aliases: aliases || [], desc: desc || '', kind: kind || 'project' });
+
+/** Change a topic's kind (general, project or profile). */
+export const setKind = (repo, slug, kind) => sendRequest(repo, { type: 'set-kind', slug, kind });
 
 /** File lines of one note under different projects: `lines` is [{text, to}] where `to` is a slug, 'ignore' or 'new:<name>'. */
 export const assignLines = (repo, q, lines, projects) =>

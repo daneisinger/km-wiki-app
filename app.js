@@ -3,7 +3,7 @@ import * as core from './core.js';
 import { marked } from './vendor/marked.esm.js';
 
 // Shown under Settings so you can tell which copy a device is running. Raise it with every change to the app.
-const APP_VERSION = '2026-11-20.1';
+const APP_VERSION = '2026-11-21.1';
 const APP_FILES = ['./', 'index.html', 'app.js', 'core.js', 'app.css', 'vendor/marked.esm.js', 'manifest.webmanifest'];
 
 const view = document.getElementById('view');
@@ -211,26 +211,34 @@ window.addEventListener('unhandledrejection', (e) => toast(`Something went wrong
 
 // ---------- screens ----------
 
+/** A picker for a topic's kind: general, project or profile. */
+const kindSelect = (id, value = 'project') => h('select', { id, 'aria-label': 'Kind' },
+  core.KINDS.map(([k, label]) => h('option', { value: k, selected: k === value }, label)));
+const KIND_HELP = 'Project: a piece of work with tasks. General: an ongoing subject, such as a job, a hobby or a group. Profile: a person or an organization.';
+
 async function home() {
   const o = await refreshChrome();
   fill(view, 
-    h('h1', {}, 'Projects'),
+    h('h1', {}, 'Topics'),
     o.questions.length || o.inboxCount || (o.health && o.health.count) ? h('div', { class: 'cards' },
       o.questions.length ? h('a', { class: 'card attn', href: '#/q' }, h('h3', {}, `${o.questions.length} question${o.questions.length > 1 ? 's' : ''} for you`), h('div', { class: 'muted' }, 'Answer them to keep the wiki accurate.')) : null,
-      o.inboxCount ? h('a', { class: 'card attn', href: '#/page/wiki/inbox.md' }, h('h3', {}, `${o.inboxCount} in the inbox`), h('div', { class: 'muted' }, 'Notes or parts of notes without a project.')) : null,
+      o.inboxCount ? h('a', { class: 'card attn', href: '#/page/wiki/inbox.md' }, h('h3', {}, `${o.inboxCount} in the inbox`), h('div', { class: 'muted' }, 'Notes or parts of notes without a topic.')) : null,
       o.health && o.health.count ? h('a', { class: 'card attn', href: '#/review' }, h('h3', {}, `${o.health.count} thing${o.health.count > 1 ? 's' : ''} to review`), h('div', { class: 'muted' }, `From the health check on ${o.health.checked}.`)) : null,
     ) : null,
-    h('div', { class: 'cards' }, o.projects.map((p) => {
-      const number = p.aliases.find((a) => /^\d+$/.test(a));
-      return h('a', { class: 'card', href: '#/p/' + p.slug },
-        h('h3', {}, p.name), number ? h('div', { class: 'num' }, number) : null,
-        h('div', { class: 'counts' },
-          h('span', {}, h('b', {}, p.counts.open), ' open'),
-          h('span', {}, h('b', {}, p.counts.question), ' questions'),
-          h('span', {}, h('b', {}, p.counts.done), ' done')));
-    })),
+    [['project', 'Projects'], ['general', 'General'], ['profile', 'Profiles']].map(([kind, heading]) => {
+      const group = o.projects.filter((p) => (p.kind || 'project') === kind);
+      return group.length ? [h('h2', {}, heading), h('div', { class: 'cards' }, group.map((p) => {
+        const number = p.aliases.find((a) => /^\d+$/.test(a));
+        return h('a', { class: 'card', href: '#/p/' + p.slug },
+          h('h3', {}, p.name), number ? h('div', { class: 'num' }, number) : null,
+          h('div', { class: 'counts' },
+            h('span', {}, h('b', {}, p.counts.open), ' open'),
+            h('span', {}, h('b', {}, p.counts.question), ' questions'),
+            h('span', {}, h('b', {}, p.counts.done), ' done')));
+      }))] : null;
+    }),
     h('div', { class: 'row' },
-      h('a', { class: 'btn', href: '#/new' }, 'New project'),
+      h('a', { class: 'btn', href: '#/new' }, 'New topic'),
       h('a', { class: 'btn', href: '#/page/wiki/index.md' }, 'All notes'),
       h('a', { class: 'btn', href: '#/review' }, 'Health check'),
       h('a', { class: 'btn', href: '#/ask' }, 'Ask'),
@@ -243,23 +251,49 @@ async function project(slug) {
   const p = registry.find((x) => x.slug === slug);
   const dir = `wiki/projects/${slug}/`;
   const md = await repo.text(dir + 'project.md');
-  if (!p || md == null) throw new Error(`There is no project "${slug}".`);
+  if (!p || md == null) throw new Error(`There is no topic "${slug}".`);
   const tasksMd = await repo.text(dir + 'tasks.md');
   const pages = (await repo.list(dir)).filter((f) => f.endsWith('.md') && !/\/(project|tasks)\.md$/.test(f));
   const titles = await Promise.all(pages.map(async (f) => core.titleOf(await repo.text(f), f.split('/').pop())));
   fill(view, 
-    crumb({ href: '#/', label: 'Projects' }, { label: p.name }),
+    crumb({ href: '#/', label: 'Topics' }, { label: p.name }),
+    kindLine(p),
     projectPage(slug, md),
     h('h2', {}, 'Tasks'),
     taskSection(slug, tasksMd),
     h('h2', {}, 'Pages'),
     h('div', { class: 'row' }, pages.map((f, i) => h('a', { class: 'btn', href: '#/page/' + f }, titles[i])),
-      h('a', { class: 'btn primary', href: '#/add/' + slug }, 'Add a note to this project'),
-      h('a', { class: 'btn', href: '#/ask/' + slug }, 'Ask about this project')),
+      h('a', { class: 'btn primary', href: '#/add/' + slug }, 'Add a note here'),
+      h('a', { class: 'btn', href: '#/ask/' + slug }, 'Ask about this topic')),
     h('h2', {}, 'Tell the wiki'),
-    h('p', { class: 'muted' }, 'Say what to change in this project in your own words: tasks, log, description, glossary or decisions. The model makes the changes and lists them.'),
+    h('p', { class: 'muted' }, 'Say what to change in this topic in your own words: tasks, log, description, glossary or decisions. The model makes the changes and lists them.'),
     instructBox(slug, 'project:' + slug, null, 'For example: T-030 is done; the clevis is only on the anchor end'),
   );
+}
+
+/** "Kind: General", with a way to change it. The change is applied on GitHub like any other request. */
+function kindLine(p) {
+  const line = h('p', { class: 'muted' });
+  const show = (kind, pending) => fill(line, `Kind: ${core.kindLabel(kind)}`, pending ? ' (pending)' : '', ' ',
+    pending ? null : h('button', { class: 'btn small', type: 'button', onclick: edit }, 'Change'));
+  const edit = () => {
+    const select = kindSelect(`kind-${p.slug}`, p.kind);
+    fill(line, h('label', { for: select.id }, 'Kind'), select,
+      h('p', { class: 'help' }, KIND_HELP),
+      h('div', { class: 'row tight' },
+        h('button', { class: 'btn small primary', type: 'button', onclick: async (e) => {
+          if (select.value === p.kind) { show(p.kind); return; }
+          e.target.disabled = true;
+          try {
+            addPending(await core.setKind(repo, p.slug, select.value), '');
+            toast('Saved. It changes within a minute or two.', 5000);
+            show(select.value, true);
+          } catch (err) { e.target.disabled = false; toast(`Could not send: ${err.message}`, 7000); }
+        } }, 'Save'),
+        h('button', { class: 'btn small', type: 'button', onclick: () => show(p.kind) }, 'Cancel')));
+  };
+  show(p.kind || 'project');
+  return line;
 }
 
 // ---------- corrections: edit what the wiki says, in place ----------
@@ -705,7 +739,7 @@ async function page(path) {
   if (md == null) throw new Error(`There is no page at ${path}.`);
   const { meta, body } = core.splitFrontMatter(md);
   const parts = path.split('/');
-  const trail = [{ href: '#/', label: 'Projects' }];
+  const trail = [{ href: '#/', label: 'Topics' }];
   if (parts[1] === 'projects' && parts[2]) {
     const p = registry.find((x) => x.slug === parts[2]);
     trail.push({ href: '#/p/' + parts[2], label: p ? p.name : parts[2] });
@@ -772,7 +806,7 @@ async function askScreen(slug) {
   const ai = store.get('ai', {});
   const scope = slug || '*';
   const title = name ? `Ask about ${name}` : 'Ask the wiki';
-  const trail = [{ href: '#/', label: 'Projects' }, ...(name ? [{ href: '#/p/' + slug, label: name }] : []), { label: 'Ask' }];
+  const trail = [{ href: '#/', label: 'Topics' }, ...(name ? [{ href: '#/p/' + slug, label: name }] : []), { label: 'Ask' }];
   if (!ai.key) {
     fill(view, crumb(...trail), h('h1', {}, title),
       h('p', {}, 'Ask sends your question and the wiki to a model straight from this device. It needs an Anthropic API key (or an OpenRouter key), stored only in this browser.'),
@@ -831,7 +865,7 @@ async function askScreen(slug) {
 
   const draw = () => {
     const history = askHistory().filter((x) => x.scope === scope);
-    const area = h('textarea', { rows: 3, 'aria-label': 'Question', placeholder: thread.turns.length ? 'Ask a follow-up question' : (name ? `Ask anything about ${name}` : 'Ask anything about your projects'),
+    const area = h('textarea', { rows: 3, 'aria-label': 'Question', placeholder: thread.turns.length ? 'Ask a follow-up question' : (name ? `Ask anything about ${name}` : 'Ask anything in your wiki'),
       oninput: (e) => { draft = e.target.value; },
       onkeydown: (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(draft); } } }, draft);
     fill(box,
@@ -906,7 +940,7 @@ async function questions() {
   const files = await repo.tree();
   for (const q of o.questions) if (files.has(core.requestPath(q.raw))) pending.add(q.raw);
   fill(view, 
-    crumb({ href: '#/', label: 'Projects' }, { label: 'Questions' }),
+    crumb({ href: '#/', label: 'Topics' }, { label: 'Questions' }),
     h('h1', {}, 'Questions for you'),
     o.questions.length ? o.questions.map((q) => questionCard(q, pending.has(q.raw)))
       : h('p', { class: 'muted' }, 'Nothing open.'),
@@ -927,13 +961,13 @@ function looseForm(q, text, body, submit) {
     if (items.length && !/^- /.test(line)) items[items.length - 1].text += '\n' + line;
     else items.push({ text: line, to: drafts.get(`${q.raw}|to${items.length}`) || '' });
   }
-  const fresh = drafts.get(`${q.raw}|new`) || [];     // [{name, number}] projects to create
+  const fresh = drafts.get(`${q.raw}|new`) || [];     // [{name, number, kind}] topics to create
   drafts.set(`${q.raw}|new`, fresh);
   const guess = registry.find((p) => p.name === q.guess);
 
   let selects = [];
   const names = () => fresh.map((p) => p.name.trim()).filter(Boolean);
-  // A new project's name changed: update the pickers in place, leaving the fields being typed in alone.
+  // A new topic's name changed: update the pickers in place, leaving the fields being typed in alone.
   const refresh = () => {
     for (const it of items) if (it.to.startsWith('new:') && !names().includes(it.to.slice(4))) it.to = '';
     selects.forEach((sel, i) => fill(sel, options(items[i])));
@@ -946,25 +980,26 @@ function looseForm(q, text, body, submit) {
     ];
   const draw = () => {
     for (const it of items) if (it.to.startsWith('new:') && !names().includes(it.to.slice(4))) it.to = '';
-    selects = items.map((it, i) => h('select', { 'aria-label': `Project for line ${i + 1}`, onchange: (e) => { it.to = e.target.value; drafts.set(`${q.raw}|to${i}`, it.to); } }, options(it)));
+    selects = items.map((it, i) => h('select', { 'aria-label': `Topic for line ${i + 1}`, onchange: (e) => { it.to = e.target.value; drafts.set(`${q.raw}|to${i}`, it.to); } }, options(it)));
     fill(body,
       guess ? h('p', { class: 'help' }, `Best guess for some of these: ${guess.name}.`) : null,
       items.map((it, i) => h('div', { class: 'assign' },
         h('pre', { class: 'lines' }, it.text),
         selects[i])),
-      fresh.length ? h('p', { class: 'help' }, 'New projects. Name one, then pick it for its lines above.') : null,
+      fresh.length ? h('p', { class: 'help' }, 'New topics. Name one, then pick it for its lines above.') : null,
       fresh.map((p, i) => h('div', { class: 'newproj' },
-        h('input', { type: 'text', placeholder: 'New project name', 'aria-label': 'New project name', value: p.name, oninput: (e) => { p.name = e.target.value; refresh(); } }),
-        h('input', { type: 'text', placeholder: 'Number (optional)', 'aria-label': 'Project number or other alias', inputmode: 'numeric', value: p.number, oninput: (e) => { p.number = e.target.value; } }),
-        h('button', { class: 'btn small', type: 'button', 'aria-label': 'Remove this new project', onclick: () => { fresh.splice(i, 1); draw(); } }, 'Remove'))),
-      h('div', { class: 'row tight' }, h('button', { class: 'btn small', type: 'button', onclick: () => { fresh.push({ name: '', number: '' }); draw(); const rows = body.querySelectorAll('.newproj'); rows[rows.length - 1].querySelector('input').focus(); } }, 'Add a new project')),
+        h('input', { type: 'text', placeholder: 'New topic name', 'aria-label': 'New topic name', value: p.name, oninput: (e) => { p.name = e.target.value; refresh(); } }),
+        h('input', { type: 'text', placeholder: 'Number (optional)', 'aria-label': 'Number or other alias', inputmode: 'numeric', value: p.number, oninput: (e) => { p.number = e.target.value; } }),
+        (() => { const k = kindSelect(`q${q.n}-kind${i}`, p.kind || 'project'); k.addEventListener('change', () => { p.kind = k.value; }); return k; })(),
+        h('button', { class: 'btn small', type: 'button', 'aria-label': 'Remove this new topic', onclick: () => { fresh.splice(i, 1); draw(); } }, 'Remove'))),
+      h('div', { class: 'row tight' }, h('button', { class: 'btn small', type: 'button', onclick: () => { fresh.push({ name: '', number: '', kind: 'project' }); draw(); const rows = body.querySelectorAll('.newproj'); rows[rows.length - 1].querySelector('input').focus(); } }, 'Add a new topic')),
       h('div', { class: 'row' },
         h('button', { class: 'btn primary', type: 'button', onclick: (e) => {
           const missing = items.findIndex((it) => !it.to);
           if (missing >= 0) { toast(`Choose where line ${missing + 1} goes first.`); return; }
           const used = fresh.filter((p) => items.some((it) => it.to === 'new:' + p.name.trim()));
           submit(e.target, () => core.assignLines(repo, q, items.map((it) => ({ text: it.text, to: it.to })),
-            used.map((p) => ({ name: p.name.trim(), aliases: p.number.split(',').map((x) => x.trim()).filter(Boolean) }))), 'Filing the lines.');
+            used.map((p) => ({ name: p.name.trim(), kind: p.kind || 'project', aliases: p.number.split(',').map((x) => x.trim()).filter(Boolean) }))), 'Filing the lines.');
         } }, 'File these lines'),
         h('button', { class: 'btn', type: 'button', onclick: (e) => submit(e.target, () => core.dismissLines(repo, q), 'Ignoring those lines.') }, 'Ignore them all')));
   };
@@ -1008,28 +1043,30 @@ function questionCard(q, alreadySent) {
     add(card, body);
     linesFor(q).then((text) => looseForm(q, text, body, submit));
   } else if (q.kind === 'project') {
-    // Pick an existing project, or "New project…" to name one and file the note under it in one go.
+    // Pick an existing topic, or "New topic…" to name one and file the note under it in one go.
     const NEW = '__new';
-    const select = h('select', { id: `q${q.n}-project`, 'aria-label': 'Project' },
+    const select = h('select', { id: `q${q.n}-project`, 'aria-label': 'Topic' },
       registry.map((p) => h('option', { value: p.slug, selected: p.name === q.guess }, p.name)),
-      h('option', { value: NEW }, 'New project…'));
+      h('option', { value: NEW }, 'New topic…'));
     const name = h('input', { type: 'text', id: `q${q.n}-name` });
-    const desc = h('textarea', { id: `q${q.n}-desc`, placeholder: 'One or two sentences about the project (optional)' });
+    const kind = kindSelect(`q${q.n}-kind`);
+    const desc = h('textarea', { id: `q${q.n}-desc`, placeholder: 'One or two sentences about the topic (optional)' });
     const fresh = h('div', { hidden: true },
-      h('label', { for: name.id }, 'Project name'), name,
+      h('label', { for: name.id }, 'Topic name'), name,
+      h('label', { for: kind.id }, 'Kind'), kind, h('p', { class: 'help' }, KIND_HELP),
       h('label', { for: desc.id }, 'Description'), desc);
     const go = h('button', { class: 'btn primary', type: 'button', onclick: (e) => {
       if (select.value !== NEW) { submit(e.target, () => core.fileNote(repo, q, select.value), 'Filing it.'); return; }
       const wanted = name.value.trim();
-      if (!wanted) { toast('Give the project a name first.'); return; }
+      if (!wanted) { toast('Give the topic a name first.'); return; }
       const same = registry.find((p) => p.name.toLowerCase() === wanted.toLowerCase());
       if (same) { submit(e.target, () => core.fileNote(repo, q, same.slug), 'Filing it.'); return; }
-      submit(e.target, () => core.fileNote(repo, q, '', { name: wanted, desc: desc.value }), 'Creating the project and filing it.');
-    } }, 'File under this project');
+      submit(e.target, () => core.fileNote(repo, q, '', { name: wanted, desc: desc.value, kind: kind.value }), 'Creating the topic and filing it.');
+    } }, 'File under this topic');
     const sync = () => {
       const making = select.value === NEW;
       fresh.hidden = !making;
-      go.textContent = making ? 'Create project and file' : 'File under this project';
+      go.textContent = making ? 'Create topic and file' : 'File under this topic';
     };
     select.addEventListener('change', sync);
     if (!registry.length) select.value = NEW;
@@ -1042,16 +1079,18 @@ function questionCard(q, alreadySent) {
   } else if (q.kind === 'unknown') {
     const name = h('input', { type: 'text', id: `q${q.n}-name`, value: q.name });
     const number = h('input', { type: 'text', id: `q${q.n}-number`, value: q.number, inputmode: 'numeric' });
-    const desc = h('textarea', { id: `q${q.n}-desc`, placeholder: 'One or two sentences about the project (optional)' });
+    const kind = kindSelect(`q${q.n}-kind`);
+    const desc = h('textarea', { id: `q${q.n}-desc`, placeholder: 'One or two sentences about the topic (optional)' });
     add(card, 
-      h('label', { for: name.id }, 'Project name'), name,
-      h('label', { for: number.id }, 'Project number or other alias'), number,
+      h('label', { for: name.id }, 'Topic name'), name,
+      h('label', { for: kind.id }, 'Kind'), kind, h('p', { class: 'help' }, KIND_HELP),
+      h('label', { for: number.id }, 'Number or other alias'), number,
       h('label', { for: desc.id }, 'Description'), desc,
       h('div', { class: 'row' },
         h('button', { class: 'btn primary', type: 'button', onclick: (e) => {
-          if (!name.value.trim()) { toast('Give the project a name first.'); return; }
-          submit(e.target, () => core.createProject(repo, { name: name.value.trim(), aliases: number.value.split(',').map((s) => s.trim()).filter(Boolean), desc: desc.value }, q), 'Creating the project.');
-        } }, 'Create project'),
+          if (!name.value.trim()) { toast('Give the topic a name first.'); return; }
+          submit(e.target, () => core.createProject(repo, { name: name.value.trim(), kind: kind.value, aliases: number.value.split(',').map((s) => s.trim()).filter(Boolean), desc: desc.value }, q), 'Creating the topic.');
+        } }, 'Create topic'),
         h('button', { class: 'btn', type: 'button', onclick: (e) => submit(e.target, () => core.dismissLines(repo, q), 'Ignoring those lines.') }, 'Ignore these lines')));
   } else {
     const text = h('textarea', { id: `q${q.n}-answer`, 'aria-label': 'Your answer', placeholder: q.kind === 'decision' ? 'The reason, if you remember it (optional)' : 'Your answer' });
@@ -1131,7 +1170,7 @@ async function addNote(presetSlug) {
       fill(view, 
         h('h1', {}, 'Note added'),
         h('p', {}, 'It is being read and filed on GitHub. It will appear in the wiki within a minute or two.'),
-        h('div', { class: 'row' }, h('a', { class: 'btn primary', href: '#/add' + (proj.value ? '/' + proj.value : '') }, 'Add another'), h('a', { class: 'btn', href: '#/' }, 'Back to projects')));
+        h('div', { class: 'row' }, h('a', { class: 'btn primary', href: '#/add' + (proj.value ? '/' + proj.value : '') }, 'Add another'), h('a', { class: 'btn', href: '#/' }, 'Back to topics')));
       refreshChrome();
     } catch (e) {
       go.disabled = false;
@@ -1140,12 +1179,12 @@ async function addNote(presetSlug) {
     }
   });
   fill(view, 
-    crumb({ href: '#/', label: 'Projects' }, { label: 'Add note' }),
+    crumb({ href: '#/', label: 'Topics' }, { label: 'Add note' }),
     h('h1', {}, 'Add a note'),
     h('label', { for: 'note-file' }, 'Photo, screenshot, PDF, text file or saved email (.eml)'), file,
     h('p', { class: 'help' }, 'On a phone this offers the camera, your photo library and Files. An email keeps its attachments: save it as a .eml file (Gmail: ⋮ > Download message; Outlook.com: ⋯ menu, then save or download).'),
     h('label', { for: 'note-text' }, 'Typed note'), typed,
-    h('label', { for: 'note-project' }, 'Project'), proj,
+    h('label', { for: 'note-project' }, 'Topic'), proj,
     h('label', { for: 'note-caption' }, 'Caption (optional)'), caption,
     h('p', { class: 'help' }, 'A caption helps most with sketches that have no writing on them.'),
     h('div', { class: 'row' }, go),
@@ -1156,22 +1195,24 @@ async function newProject() {
   await refreshChrome();
   const name = h('input', { type: 'text', id: 'np-name' });
   const alias = h('input', { type: 'text', id: 'np-alias', placeholder: 'For example: 25014, Lobby piece' });
-  const desc = h('textarea', { id: 'np-desc', placeholder: 'One or two sentences. This is given to the AI every time it reads a note for this project.' });
+  const kind = kindSelect('np-kind');
+  const desc = h('textarea', { id: 'np-desc', placeholder: 'One or two sentences. This is given to the AI every time it reads a note for this topic.' });
   const go = h('button', { class: 'btn primary', type: 'button', onclick: async () => {
-    if (!name.value.trim()) { toast('Give the project a name first.'); return; }
+    if (!name.value.trim()) { toast('Give the topic a name first.'); return; }
     go.disabled = true;
     try {
-      const path = await core.createProject(repo, { name: name.value.trim(), aliases: alias.value.split(',').map((s) => s.trim()).filter(Boolean), desc: desc.value });
+      const path = await core.createProject(repo, { name: name.value.trim(), kind: kind.value, aliases: alias.value.split(',').map((s) => s.trim()).filter(Boolean), desc: desc.value });
       addPending(path, '');
-      fill(view, h('h1', {}, 'Project requested'), h('p', {}, `"${name.value.trim()}" will appear in the project list within a minute or two.`),
-        h('div', { class: 'row' }, h('a', { class: 'btn', href: '#/' }, 'Back to projects')));
+      fill(view, h('h1', {}, 'Topic requested'), h('p', {}, `"${name.value.trim()}" will appear in the list within a minute or two.`),
+        h('div', { class: 'row' }, h('a', { class: 'btn', href: '#/' }, 'Back to topics')));
       refreshChrome();
     } catch (e) { go.disabled = false; toast(`Could not send: ${e.message}`, 7000); }
-  } }, 'Create project');
+  } }, 'Create topic');
   fill(view, 
-    crumb({ href: '#/', label: 'Projects' }, { label: 'New project' }),
-    h('h1', {}, 'New project'),
+    crumb({ href: '#/', label: 'Topics' }, { label: 'New topic' }),
+    h('h1', {}, 'New topic'),
     h('label', { for: 'np-name' }, 'Name'), name,
+    h('label', { for: 'np-kind' }, 'Kind'), kind, h('p', { class: 'help' }, KIND_HELP),
     h('label', { for: 'np-alias' }, 'Number and other names, separated by commas'), alias,
     h('label', { for: 'np-desc' }, 'Description'), desc,
     h('div', { class: 'row' }, go),
@@ -1278,7 +1319,7 @@ async function route(scroll = true) {
     if (scroll) window.scrollTo(0, 0);
   } catch (e) {
     fill(view, h('div', { class: 'error' }, h('p', {}, e.message || String(e)),
-      h('div', { class: 'row' }, h('a', { class: 'btn', href: '#/' }, 'Projects'), h('a', { class: 'btn', href: '#/setup' }, 'Settings'))));
+      h('div', { class: 'row' }, h('a', { class: 'btn', href: '#/' }, 'Topics'), h('a', { class: 'btn', href: '#/setup' }, 'Settings'))));
   }
 }
 
