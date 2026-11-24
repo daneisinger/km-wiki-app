@@ -3,7 +3,7 @@ import * as core from './core.js';
 import { marked } from './vendor/marked.esm.js';
 
 // Shown under Settings so you can tell which copy a device is running. Raise it with every change to the app.
-const APP_VERSION = '2026-11-21.1';
+const APP_VERSION = '2026-11-24.1';
 const APP_FILES = ['./', 'index.html', 'app.js', 'core.js', 'app.css', 'vendor/marked.esm.js', 'manifest.webmanifest'];
 
 const view = document.getElementById('view');
@@ -258,7 +258,7 @@ async function project(slug) {
   fill(view, 
     crumb({ href: '#/', label: 'Topics' }, { label: p.name }),
     kindLine(p),
-    projectPage(slug, md),
+    projectPage(slug, md, p),
     h('h2', {}, 'Tasks'),
     taskSection(slug, tasksMd),
     h('h2', {}, 'Pages'),
@@ -324,9 +324,15 @@ async function sendFix(button, key, data, action) {
 const editButton = (label, onclick) => h('button', { class: 'editbtn', type: 'button', 'aria-label': label, onclick }, label.split(' ')[0]);
 const pendingNote = () => h('p', { class: 'help pending' }, 'Pending: GitHub is applying this change.');
 
-function projectPage(slug, md) {
+function projectPage(slug, md, topic = {}) {
   const path = `wiki/projects/${slug}/project.md`;
   const parts = core.projectParts(md);
+  if (topic.kind === 'profile') {   // a profile always shows its contact details and the topics it is linked from, even empty
+    const at = Math.max(0, parts.sections.findIndex((s) => s.name === 'Description') + 1);
+    if (!parts.sections.some((s) => s.name === 'Contact')) parts.sections.splice(at, 0, { name: 'Contact', text: '' });
+    const after = parts.sections.findIndex((s) => s.name === 'Contact') + 1;
+    if (!parts.sections.some((s) => s.name === 'Linked from')) parts.sections.splice(after, 0, { name: 'Linked from', text: '' });
+  }
   const names = parts.sections.map((s) => s.name);
   const fixed = (n) => core.FIXED_SECTIONS.includes(n);
   // Sections added from this device that GitHub has not written yet.
@@ -339,6 +345,8 @@ function projectPage(slug, md) {
     if (['Glossary', 'People and suppliers', 'Pages'].includes(s.name)) place();
     out.push(s.name === 'Glossary' ? tableBlock(slug, 'glossary', s, path)
       : s.name === 'People and suppliers' ? tableBlock(slug, 'people', s, path)
+      : s.name === 'Contact' ? tableBlock(slug, 'contact', s, path, topic)
+      : s.name === 'Linked from' ? linkedBlock(slug, s, path)
       : fixed(s.name) ? renderMarkdown(`## ${s.name}\n\n${s.text}`, path)
       : sectionBlock(slug, s.name, s.text, path, { names }));
   }
@@ -432,33 +440,52 @@ function sectionBlock(slug, name, text, path, { names = [], fresh = false } = {}
 }
 
 
-/** The Glossary or the People and suppliers table, with each row editable and a way to add one. */
-function tableBlock(slug, target, section, path) {
-  const words = target === 'glossary' ? { first: 'Term', second: 'Meaning', add: 'Add a term', one: 'term' } : { first: 'Name', second: 'Role', add: 'Add a person or supplier', one: 'name' };
+/**
+ * The Glossary, the People and suppliers, or a profile's Contact table, with each row editable and a way to add one.
+ * A person's name can be linked to their profile; a Contact table can be downloaded as a contact card.
+ */
+function tableBlock(slug, target, section, path, topic = {}) {
+  const words = target === 'glossary' ? { first: 'Term', second: 'Meaning', add: 'Add a term', one: 'term' }
+    : target === 'contact' ? { first: 'Field', second: 'Value', add: 'Add a contact detail', one: 'field' }
+    : { first: 'Name', second: 'Role', add: 'Add a person or supplier', one: 'name' };
   const key = `${target}:${slug}`;
   const box = h('section', { class: 'fixable' });
   const plain = (t) => t.replace(/ *\[src\]\([^)]*\)/g, '').trim();
-  let draft = null;   // {was, term, meaning, confirmRemove}; was === '' for a new row
+  const profiles = registry.filter((p) => p.kind === 'profile' && p.slug !== slug).sort((a, b) => a.name.localeCompare(b.name));
+  let draft = null;   // {was, term, meaning, profile, confirmRemove}; was === '' for a new row
   const draw = () => {
     const rows = core.tableRows(section.text);
     for (const fix of pendingFixes(key)) {
-      const at = rows.findIndex((r) => r.term.toLowerCase() === (fix.was || fix.term).toLowerCase());
+      const at = rows.findIndex((r) => r.key.toLowerCase() === (fix.was || fix.term).toLowerCase());
       if (fix.remove) { if (at >= 0) rows.splice(at, 1); continue; }
-      const row = { term: fix.term, meaning: fix.meaning, status: 'confirmed', pending: true };
+      const row = { term: fix.term, key: fix.term, meaning: fix.meaning, status: 'confirmed', pending: true, profile: fix.profile || '' };
       if (at >= 0) rows[at] = row; else rows.push(row);
     }
     const form = () => {
       const d = draft;
       const send = async (button, data) => { if (await sendFix(button, key, data, () => core.correctRow(repo, slug, target, data))) draft = null; draw(); };
+      const pick = target === 'people' ? h('select', { 'aria-label': 'Profile', onchange: (e) => { d.profile = e.target.value; } },
+        h('option', { value: '', selected: !d.profile }, 'No profile'),
+        profiles.map((p) => h('option', { value: p.slug, selected: d.profile === p.slug }, p.name)),
+        h('option', { value: '\u0000new', selected: d.profile === '\u0000new' }, 'Create a profile for this name')) : null;
       return h('form', { class: 'fixedit', onsubmit: (e) => {
         e.preventDefault();
         const term = d.term.trim(), meaning = d.meaning.trim();
         if (!term) { toast(`Give the ${words.one} first.`); return; }
-        if (rows.some((r) => r.term.toLowerCase() === term.toLowerCase() && r.term.toLowerCase() !== d.was.toLowerCase())) { toast(`"${term}" is already in the list.`); return; }
-        send(e.submitter || e.target.querySelector('button'), { was: d.was, term, meaning });
+        if (target === 'contact' && !meaning) { toast('Give the value first. To delete a detail, use Remove.'); return; }
+        if (rows.some((r) => r.key.toLowerCase() === term.toLowerCase() && r.key.toLowerCase() !== d.was.toLowerCase())) { toast(`"${term}" is already in the list.`); return; }
+        const data = { was: d.was, term, meaning };
+        if (target === 'people') {
+          if (d.profile === '\u0000new') data.newProfile = true;
+          else data.profile = d.profile;
+        }
+        send(e.submitter || e.target.querySelector('button'), data);
       } },
-        h('label', {}, words.first, h('input', { type: 'text', value: d.term, autocapitalize: 'off', oninput: (e) => { d.term = e.target.value; } })),
+        h('label', {}, words.first, h('input', { type: 'text', value: d.term, autocapitalize: 'off', list: target === 'contact' ? 'contact-fields' : null, oninput: (e) => { d.term = e.target.value; } })),
+        target === 'contact' ? h('datalist', { id: 'contact-fields' }, core.CONTACT_FIELDS.map((f) => h('option', { value: f }))) : null,
         h('label', {}, words.second, h('textarea', { rows: 2, oninput: (e) => { d.meaning = e.target.value; } }, d.meaning)),
+        pick ? h('label', {}, 'Profile', pick) : null,
+        pick ? h('p', { class: 'help' }, 'Links the name to the profile of this person or organization, where their contact details are kept.') : null,
         h('div', { class: 'row' },
           h('button', { class: 'btn primary', type: 'submit' }, 'Save'),
           h('button', { class: 'btn', type: 'button', onclick: () => { draft = null; draw(); } }, 'Cancel'),
@@ -467,18 +494,71 @@ function tableBlock(slug, target, section, path) {
             send(e.target, { was: d.was, remove: true });
           } }, 'Remove') : null));
     };
-    const editingRow = (r) => draft && draft.was && draft.was.toLowerCase() === r.term.toLowerCase();
+    const editingRow = (r) => draft && draft.was && draft.was.toLowerCase() === r.key.toLowerCase();
+    const download = target === 'contact' && rows.length ? h('button', { class: 'btn', type: 'button', onclick: () => {
+      const blob = new Blob([core.vcardFor(topic.name || slug, rows)], { type: 'text/vcard' });
+      const a = h('a', { href: URL.createObjectURL(blob), download: `${(topic.name || slug).replace(/[^\w\- ]+/g, '_')}.vcf` });
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    } }, 'Download contact') : null;
     fill(box,
       h('h2', {}, section.name),
       rows.length ? h('div', { class: 'md' }, h('div', { class: 'tablewrap' }, h('table', { class: 'fixtable' },
         h('thead', {}, h('tr', {}, h('th', {}, words.first), h('th', {}, words.second), h('th', {}, 'Status'), h('th', {}, h('span', { class: 'sr' }, 'Edit')))),
         h('tbody', {}, rows.map((r) => (editingRow(r) ? h('tr', {}, h('td', { colspan: 4 }, form()))
           : h('tr', { class: r.pending ? 'pendingrow' : null },
-            h('td', {}, renderMarkdown(r.term, path)), h('td', {}, renderMarkdown(r.meaning, path)),
+            h('td', {}, renderMarkdown(r.term, path)), h('td', {}, renderMarkdown(target === 'contact' ? callable(r) : r.meaning, path)),
             h('td', {}, renderMarkdown(r.status, path), r.pending ? h('span', { class: 'chip' }, 'pending') : null),
-            h('td', {}, editButton(`Edit ${r.term}`, () => { draft = { was: r.term, term: r.term, meaning: plain(r.meaning) }; draw(); box.querySelector('.fixedit textarea').focus(); })))))))))
-        : h('p', { class: 'muted' }, 'Nothing here yet.'),
-      draft && !draft.was ? form() : h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', onclick: () => { draft = { was: '', term: '', meaning: '' }; draw(); box.querySelector('.fixedit input').focus(); } }, words.add)));
+            h('td', {}, editButton(`Edit ${r.key}`, () => { draft = { was: r.key, term: r.key, meaning: plain(r.meaning), profile: r.profile || '' }; draw(); box.querySelector('.fixedit textarea').focus(); })))))))))
+        : h('p', { class: 'muted' }, target === 'contact' ? 'No contact details yet. Add them here, add a contact card (.vcf) with Add a note, or forward an email from them.' : 'Nothing here yet.'),
+      draft && !draft.was ? form() : h('div', { class: 'row' },
+        h('button', { class: 'btn', type: 'button', onclick: () => { draft = { was: '', term: '', meaning: '', profile: '' }; draw(); box.querySelector('.fixedit input').focus(); } }, words.add),
+        download));
+  };
+  draw();
+  return box;
+}
+
+/** A Contact row's value with a phone number made tappable (tel: link). */
+function callable(r) {
+  const value = core.cellText(r.meaning);
+  const digits = value.replace(/[^\d+]/g, '');
+  return /^Phone/i.test(r.key) && !/^Phone \((work |home )?fax\)/i.test(r.key) && digits.length >= 7 && !/\]\(tel:/.test(r.meaning)
+    ? r.meaning.replace(value, `[${value}](tel:${digits})`) : r.meaning;
+}
+
+/** On a profile: the topics whose people tables link to it (generated by the ingest script), and a way to add one. */
+function linkedBlock(slug, section, path) {
+  const key = `linked:${slug}`;
+  const box = h('section', { class: 'fixable' });
+  let draft = null;   // {topic, role} while adding
+  const draw = () => {
+    const text = section.text.replace(/<!--[\s\S]*?-->/g, '').trim();
+    const pending = pendingFixes(key).filter((f) => !text.includes(`](../${f.topic}/project.md)`));
+    const topics = registry.filter((p) => p.slug !== slug).sort((a, b) => a.name.localeCompare(b.name));
+    fill(box,
+      h('h2', {}, 'Linked from'),
+      text ? renderMarkdown(text, path) : (pending.length ? null : h('p', { class: 'muted' }, 'Not listed under People and suppliers in any topic yet.')),
+      pending.length ? h('ul', {}, pending.map((f) => h('li', { class: 'pendingrow' }, (registry.find((p) => p.slug === f.topic) || { name: f.topic }).name,
+        f.role ? `: ${f.role}` : '', ' ', h('span', { class: 'chip' }, 'pending')))) : null,
+      draft ? h('form', { class: 'fixedit', onsubmit: async (e) => {
+        e.preventDefault();
+        if (!draft.topic) { toast('Choose a topic first.'); return; }
+        const data = { topic: draft.topic, role: draft.role.trim() };
+        if (await sendFix(e.submitter || e.target.querySelector('button'), key, data, () => core.linkProfile(repo, slug, data.topic, data.role))) draft = null;
+        draw();
+      } },
+        h('label', {}, 'Topic', h('select', { onchange: (e) => { draft.topic = e.target.value; } },
+          h('option', { value: '' }, 'Choose a topic'),
+          topics.map((p) => h('option', { value: p.slug, selected: draft.topic === p.slug }, p.name)))),
+        h('label', {}, 'Role in that topic (optional)', h('input', { type: 'text', value: draft.role, placeholder: 'For example: Onsite GC contact', oninput: (e) => { draft.role = e.target.value; } })),
+        h('p', { class: 'help' }, 'Lists this profile under People and suppliers on that topic, linked back here. If the name is already listed there, it is linked.'),
+        h('div', { class: 'row' },
+          h('button', { class: 'btn primary', type: 'submit' }, 'Add'),
+          h('button', { class: 'btn', type: 'button', onclick: () => { draft = null; draw(); } }, 'Cancel')))
+        : h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', onclick: () => { draft = { topic: '', role: '' }; draw(); box.querySelector('.fixedit select').focus(); } }, 'Add to a topic')));
   };
   draw();
   return box;
@@ -1144,7 +1224,7 @@ async function shrinkImage(file) {
 
 async function addNote(presetSlug) {
   await refreshChrome();
-  const file = h('input', { type: 'file', id: 'note-file', accept: 'image/*,application/pdf,.txt,.md,.eml,message/rfc822' });
+  const file = h('input', { type: 'file', id: 'note-file', accept: 'image/*,application/pdf,.txt,.md,.eml,message/rfc822,.vcf,text/vcard,text/x-vcard' });
   const typed = h('textarea', { id: 'note-text', placeholder: 'Or type a note here' });
   const proj = h('select', { id: 'note-project' },
     h('option', { value: '' }, 'Let the AI decide'),
@@ -1181,8 +1261,8 @@ async function addNote(presetSlug) {
   fill(view, 
     crumb({ href: '#/', label: 'Topics' }, { label: 'Add note' }),
     h('h1', {}, 'Add a note'),
-    h('label', { for: 'note-file' }, 'Photo, screenshot, PDF, text file or saved email (.eml)'), file,
-    h('p', { class: 'help' }, 'On a phone this offers the camera, your photo library and Files. An email keeps its attachments: save it as a .eml file (Gmail: ⋮ > Download message; Outlook.com: ⋯ menu, then save or download).'),
+    h('label', { for: 'note-file' }, 'Photo, screenshot, PDF, text file, saved email (.eml) or contact card (.vcf)'), file,
+    h('p', { class: 'help' }, 'On a phone this offers the camera, your photo library and Files. An email keeps its attachments: save it as a .eml file (Gmail: ⋮ > Download message; Outlook.com: ⋯ menu, then save or download). A contact card fills in that person\'s profile, creating it if needed; choose a topic to list them there too.'),
     h('label', { for: 'note-text' }, 'Typed note'), typed,
     h('label', { for: 'note-project' }, 'Topic'), proj,
     h('label', { for: 'note-caption' }, 'Caption (optional)'), caption,

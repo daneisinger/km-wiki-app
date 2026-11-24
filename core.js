@@ -549,13 +549,20 @@ export function projectParts(md) {
 /** Section text as the owner edits it: paragraphs without their source links. */
 export const plainText = (text) => stripSrc(text).split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean).join('\n\n');
 
-/** Rows of a three-column table (Term | Meaning | Status): [{term, meaning, status}]. The header row is left out. */
+/**
+ * Rows of a three-column table (Term | Meaning | Status): [{term, meaning, status, key, profile}]. The header
+ * row is left out. `key` is the first cell without a link around it; `profile` is the slug of the profile a
+ * linked name points to ("[Ryan](../ryan/project.md)"), or ''.
+ */
 export function tableRows(text) {
   const rows = [];
   for (const line of text.split('\n')) {
     if (!line.startsWith('|')) continue;
     const cells = line.trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
-    if (cells[0] && !/^[-: ]+$/.test(cells[0])) rows.push({ term: cells[0], meaning: cells[1] || '', status: cells[2] || '' });
+    if (!cells[0] || /^[-: ]+$/.test(cells[0])) continue;
+    const link = cells[0].match(/^\[([^\]]+)\]\(([^)\s]+)\)$/);
+    const profile = link ? ((link[2].match(/^\.\.\/([^/]+)\/project\.md$/) || [])[1] || '') : '';
+    rows.push({ term: cells[0], meaning: cells[1] || '', status: cells[2] || '', key: link ? link[1].trim() : cells[0], profile });
   }
   return rows.slice(1);
 }
@@ -586,7 +593,7 @@ export function noteParts(md) {
 }
 
 /** Sections of a project page that keep their own form: the script writes them, or they have editors of their own. */
-export const FIXED_SECTIONS = ['Tasks', 'Glossary', 'People and suppliers', 'Pages'];
+export const FIXED_SECTIONS = ['Tasks', 'Glossary', 'People and suppliers', 'Pages', 'Contact', 'Linked from'];
 
 /**
  * Add, change, rename or remove one of the owner's sections on a project page.
@@ -598,9 +605,61 @@ export const correctSection = (repo, slug, { was = '', name, text = '', remove =
 export const correctDescription = (repo, slug, text) =>
   sendRequest(repo, { type: 'correct', target: 'description', slug, text });
 
-/** `target` is 'glossary' or 'people'. `row` is {was, term, meaning} to change or add a row, or {was, remove: true}. */
+/**
+ * `target` is 'glossary', 'people' or 'contact'. `row` is {was, term, meaning} to change or add a row, or {was, remove: true}.
+ * For people, `profile` links the name to that profile ('' for no link; leave it out to keep the link there is),
+ * and `newProfile: true` creates a profile for the name first.
+ */
 export const correctRow = (repo, slug, target, row) =>
-  sendRequest(repo, { type: 'correct', target, slug, was: row.was || '', term: row.term || '', meaning: row.meaning || '', remove: !!row.remove });
+  sendRequest(repo, { type: 'correct', target, slug, was: row.was || '', term: row.term || '', meaning: row.meaning || '', remove: !!row.remove,
+    ...(row.profile !== undefined ? { profile: row.profile } : {}), ...(row.newProfile ? { new_profile: true } : {}) });
+
+// ---------- profiles and contact details ----------
+
+/** Fields offered when adding a contact detail. Any other name can be typed. */
+export const CONTACT_FIELDS = ['Organization', 'Title', 'Email', 'Email (work)', 'Email (home)', 'Phone (mobile)', 'Phone (work)',
+  'Phone (home)', 'Phone (fax)', 'Address (work)', 'Address (home)', 'Website', 'Birthday', 'Note'];
+
+/** List a profile in another topic's people table, linked to the profile. */
+export const linkProfile = (repo, profile, topic, role) => sendRequest(repo, { type: 'link-profile', profile, topic, role: role || '' });
+
+/** A topic slug a markdown link points to ("[Acme](../acme/project.md)" -> "acme"), or ''. */
+export const linkedSlug = (cell) => ((cell || '').match(/\]\(\.\.\/([^/)]+)\/project\.md\)/) || [])[1] || '';
+
+/** Text of a table cell without source links and with links reduced to their text. */
+export const cellText = (cell) => stripSrc(cell || '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').trim();
+
+/**
+ * A vCard 3.0 for a profile, from its name and its Contact rows ({key, meaning}). `isOrg` writes an organization's
+ * card (no first and last name). Phones, emails and addresses keep their labels as TYPE.
+ */
+export function vcardFor(name, rows, isOrg = false) {
+  const esc = (v) => String(v).replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/([,;])/g, '\\$1');
+  const TYPES = { mobile: 'CELL', work: 'WORK', home: 'HOME', main: 'MAIN', fax: 'FAX', 'work fax': 'WORK,FAX', 'home fax': 'HOME,FAX', pager: 'PAGER', other: 'OTHER' };
+  const lines = ['BEGIN:VCARD', 'VERSION:3.0', `FN:${esc(name)}`];
+  const parts = name.trim().split(/\s+/);
+  lines.push(isOrg || parts.length < 2 ? `N:${esc(isOrg ? '' : name)};;;;` : `N:${esc(parts.slice(-1)[0])};${esc(parts.slice(0, -1).join(' '))};;;`);
+  let org = isOrg ? name : '';
+  for (const r of rows) {
+    const value = cellText(r.meaning);
+    const m = r.key.match(/^(\w+)(?:\s*\(([^)]*)\))?/);
+    if (!value || !m) continue;
+    const field = m[1].toLowerCase();
+    const type = m[2] ? (TYPES[m[2].toLowerCase()] || m[2].toUpperCase().replace(/[^A-Z,]/g, '')) : '';
+    const t = type ? `;TYPE=${type}` : '';
+    if (field === 'organization') org = value;
+    else if (field === 'title') lines.push(`TITLE:${esc(value)}`);
+    else if (field === 'email') lines.push(`EMAIL;TYPE=INTERNET${type ? ',' + type : ''}:${value}`);
+    else if (field === 'phone') lines.push(`TEL${t}:${value}`);
+    else if (field === 'address') lines.push(`ADR${t}:;;${esc(value)};;;;`);
+    else if (field === 'website') lines.push(`URL${t}:${value}`);
+    else if (field === 'birthday' && /^\d{4}-\d{2}-\d{2}$/.test(value)) lines.push(`BDAY:${value}`);
+    else if (field === 'note') lines.push(`NOTE:${esc(value)}`);
+  }
+  if (org) lines.splice(4, 0, `ORG:${esc(org)}`);
+  lines.push('END:VCARD');
+  return lines.join('\r\n') + '\r\n';
+}
 
 /** Replace the text of one transcription section of a note; the wiki is then checked against it. */
 export const correctTranscription = (repo, note, index, text) =>
