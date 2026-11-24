@@ -3,7 +3,7 @@ import * as core from './core.js';
 import { marked } from './vendor/marked.esm.js';
 
 // Shown under Settings so you can tell which copy a device is running. Raise it with every change to the app.
-const APP_VERSION = '2026-11-24.3';
+const APP_VERSION = '2026-11-24.4';
 const APP_FILES = ['./', 'index.html', 'app.js', 'core.js', 'app.css', 'vendor/marked.esm.js', 'manifest.webmanifest'];
 
 const view = document.getElementById('view');
@@ -92,7 +92,9 @@ function renderMarkdown(md, path) {
       if (file.startsWith('raw/')) { a.setAttribute('href', '#'); a.dataset.file = file; } else a.removeAttribute('href');
       continue;
     }
-    a.setAttribute('href', '#/page/' + core.resolvePath(path, href));
+    const target = core.resolvePath(path, href);
+    const topic = target.match(/^wiki\/projects\/([^/]+)\/project\.md$/);   // a topic's page opens as the topic, with its editors
+    a.setAttribute('href', topic ? '#/p/' + topic[1] : '#/page/' + target);
     if (a.textContent === 'src') a.className = 'src';
   }
   for (const img of doc.body.querySelectorAll('img[src]')) {
@@ -1430,6 +1432,7 @@ async function route(scroll = true) {
     else if (hash === 'new') await newProject();
     else if (hash === 'add' || hash.startsWith('add/')) await addNote(hash.slice(4));
     else if (hash.startsWith('p/')) await project(hash.slice(2));
+    else if (/^page\/wiki\/projects\/[^/]+\/project\.md$/.test(hash)) await project(hash.split('/')[3]);   // older links to a topic's file
     else if (hash.startsWith('page/')) await page(hash.slice(5));
     else await home();
     lastSignature = await signature();
