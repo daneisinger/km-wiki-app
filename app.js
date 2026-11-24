@@ -3,7 +3,7 @@ import * as core from './core.js';
 import { marked } from './vendor/marked.esm.js';
 
 // Shown under Settings so you can tell which copy a device is running. Raise it with every change to the app.
-const APP_VERSION = '2026-11-24.2';
+const APP_VERSION = '2026-11-24.3';
 const APP_FILES = ['./', 'index.html', 'app.js', 'core.js', 'app.css', 'vendor/marked.esm.js', 'manifest.webmanifest'];
 
 const view = document.getElementById('view');
@@ -258,9 +258,7 @@ async function project(slug) {
   fill(view, 
     crumb({ href: '#/', label: 'Topics' }, { label: p.name }),
     kindLine(p),
-    projectPage(slug, md, p),
-    h('h2', {}, 'Tasks'),
-    taskSection(slug, tasksMd),
+    projectPage(slug, md, p, [h('h2', {}, 'Tasks'), taskSection(slug, tasksMd)]),
     h('h2', {}, 'Pages'),
     h('div', { class: 'row' }, pages.map((f, i) => h('a', { class: 'btn', href: '#/page/' + f }, titles[i])),
       h('a', { class: 'btn primary', href: '#/add/' + slug }, 'Add a note here'),
@@ -324,41 +322,80 @@ async function sendFix(button, key, data, action) {
 const editButton = (label, onclick) => h('button', { class: 'editbtn', type: 'button', 'aria-label': label, onclick }, label.split(' ')[0]);
 const pendingNote = () => h('p', { class: 'help pending' }, 'Pending: GitHub is applying this change.');
 
-function projectPage(slug, md, topic = {}) {
+// The order sections are shown in, by kind of topic. "*" is where your own sections go. Sections not
+// listed (none, normally) follow at the end. The files keep their own order; this is only how the app shows them.
+const SECTION_ORDER = {
+  profile: ['Description', 'Contact', 'People and suppliers', 'Linked from', '*', 'Tasks', 'Glossary'],
+  other: ['Description', 'Contact', 'Linked from', '*', 'Tasks', 'Glossary', 'People and suppliers'],
+};
+
+/**
+ * A topic page: its sections in the order for its kind, with `tasks` (the Tasks heading and list) in its place.
+ * Empty tables and an empty Linked from are left out; their Add buttons are gathered in one row at the end,
+ * and tapping one opens that section there with its form ready.
+ */
+function projectPage(slug, md, topic = {}, tasks = []) {
   const path = `wiki/projects/${slug}/project.md`;
   const parts = core.projectParts(md);
-  if (topic.kind === 'profile') {   // a profile always shows its contact details and the topics it is linked from, even empty
-    const at = Math.max(0, parts.sections.findIndex((s) => s.name === 'Description') + 1);
-    if (!parts.sections.some((s) => s.name === 'Contact')) parts.sections.splice(at, 0, { name: 'Contact', text: '' });
-    const after = parts.sections.findIndex((s) => s.name === 'Contact') + 1;
-    if (!parts.sections.some((s) => s.name === 'Linked from')) parts.sections.splice(after, 0, { name: 'Linked from', text: '' });
-  }
+  const isProfile = topic.kind === 'profile';
   const names = parts.sections.map((s) => s.name);
   const fixed = (n) => core.FIXED_SECTIONS.includes(n);
+  const section = (name) => parts.sections.find((s) => s.name === name) || { name, text: '' };
+  const TABLE = { Glossary: 'glossary', 'People and suppliers': 'people', Contact: 'contact' };
   // Sections added from this device that GitHub has not written yet.
   const added = pendingFixes(`sections:${slug}`).filter((f) => !names.some((n) => n.toLowerCase() === f.name.toLowerCase()));
-  const adder = addSectionBlock(slug, () => [...names, ...added.map((f) => f.name)]);
+  const isEmpty = (name) => {
+    if (TABLE[name]) return !core.tableRows(section(name).text).length && !pendingFixes(`${TABLE[name]}:${slug}`).length;
+    if (name === 'Linked from') return !section(name).text.replace(/<!--[\s\S]*?-->/g, '').trim() && !pendingFixes(`linked:${slug}`).length;
+    return false;
+  };
+  const block = (name, start = false) => (TABLE[name] ? tableBlock(slug, TABLE[name], section(name), path, topic, { start })
+    : name === 'Linked from' ? linkedBlock(slug, section(name), path, { start })
+    : fixed(name) ? renderMarkdown(`## ${name}\n\n${section(name).text}`, path)
+    : sectionBlock(slug, name, section(name).text, path, { names }));
+
+  const order = SECTION_ORDER[isProfile ? 'profile' : 'other'];
+  const own = names.filter((n) => !fixed(n) && n !== 'Description');
+  const shown = order.filter((n) => n === '*' || n === 'Tasks' || names.includes(n) || (isProfile && ['Contact', 'Linked from'].includes(n)));
+  shown.push(...names.filter((n) => !order.includes(n) && !own.includes(n) && n !== 'Pages'));
+
   const out = [parts.pre ? renderMarkdown(parts.pre, path) : null];
-  let placed = false;
-  const place = () => { if (!placed) { placed = true; out.push(added.map((f) => sectionBlock(slug, f.name, f.text, path, { fresh: true })), adder); } };
-  for (const s of parts.sections) {
-    if (['Glossary', 'People and suppliers', 'Pages'].includes(s.name)) place();
-    out.push(s.name === 'Glossary' ? tableBlock(slug, 'glossary', s, path)
-      : s.name === 'People and suppliers' ? tableBlock(slug, 'people', s, path)
-      : s.name === 'Contact' ? tableBlock(slug, 'contact', s, path, topic)
-      : s.name === 'Linked from' ? linkedBlock(slug, s, path)
-      : fixed(s.name) ? renderMarkdown(`## ${s.name}\n\n${s.text}`, path)
-      : sectionBlock(slug, s.name, s.text, path, { names }));
+  const hidden = [];
+  for (const name of shown) {
+    if (name === 'Tasks') out.push(tasks);
+    else if (name === '*') out.push(own.map((n) => block(n)), added.map((f) => sectionBlock(slug, f.name, f.text, path, { fresh: true })));
+    else if (isEmpty(name)) hidden.push(name);
+    else out.push(block(name));
   }
-  place();
+
+  const LABELS = { Contact: 'Contact detail', 'People and suppliers': 'Person or supplier', Glossary: 'Glossary term', 'Linked from': 'Link to a topic' };
+  const items = hidden.map((name) => ({ label: LABELS[name] || name, make: () => block(name, true) }));
+  items.push({ label: 'Section', make: () => addSectionBlock(slug, () => [...names, ...added.map((f) => f.name)], { start: true }) });
+  out.push(addRow(items));
   return h('div', {}, out);
+}
+
+/** One row of small buttons, "Add to this page: ...". Each opens its section just above the row, with the form ready. */
+function addRow(items) {
+  const box = h('div', { class: 'addrow' });
+  fill(box, h('span', { class: 'muted' }, 'Add to this page:'), items.map((it) => {
+    const button = h('button', { class: 'btn small', type: 'button', onclick: () => {
+      const el = it.make();
+      box.before(el);
+      button.remove();
+      const field = el.querySelector('.fixedit input, .fixedit select, .fixedit textarea');
+      if (field) field.focus();
+    } }, it.label);
+    return button;
+  }));
+  return box;
 }
 
 const sectionKey = (slug, name) => `section:${slug}:${name.toLowerCase()}`;
 
-function addSectionBlock(slug, existing) {
+function addSectionBlock(slug, existing, { start = false } = {}) {
   const box = h('div', { class: 'addsection' });
-  let draft = null;   // {name, text} while adding
+  let draft = start ? { name: '', text: '' } : null;   // {name, text} while adding
   const draw = () => {
     if (!draft) {
       fill(box, h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', onclick: () => { draft = { name: '', text: '' }; draw(); box.querySelector('input').focus(); } }, 'Add a section')));
@@ -444,7 +481,7 @@ function sectionBlock(slug, name, text, path, { names = [], fresh = false } = {}
  * The Glossary, the People and suppliers, or a profile's Contact table, with each row editable and a way to add one.
  * A person's name can be linked to their profile; a Contact table can be downloaded as a contact card.
  */
-function tableBlock(slug, target, section, path, topic = {}) {
+function tableBlock(slug, target, section, path, topic = {}, { start = false } = {}) {
   const words = target === 'glossary' ? { first: 'Term', second: 'Meaning', add: 'Add a term', one: 'term' }
     : target === 'contact' ? { first: 'Field', second: 'Value', add: 'Add a contact detail', one: 'field' }
     : { first: 'Name', second: 'Role', add: 'Add a person or supplier', one: 'name' };
@@ -452,7 +489,7 @@ function tableBlock(slug, target, section, path, topic = {}) {
   const box = h('section', { class: 'fixable' });
   const plain = (t) => t.replace(/ *\[src\]\([^)]*\)/g, '').trim();
   const profiles = registry.filter((p) => p.kind === 'profile' && p.slug !== slug).sort((a, b) => a.name.localeCompare(b.name));
-  let draft = null;   // {was, term, meaning, profile, confirmRemove}; was === '' for a new row
+  let draft = start ? { was: '', term: '', meaning: '', profile: '' } : null;   // {was, term, meaning, profile, confirmRemove}; was === '' for a new row
   const draw = () => {
     const rows = core.tableRows(section.text);
     for (const fix of pendingFixes(key)) {
@@ -530,10 +567,10 @@ function callable(r) {
 }
 
 /** On a profile: the topics whose people tables link to it (generated by the ingest script), and a way to add one. */
-function linkedBlock(slug, section, path) {
+function linkedBlock(slug, section, path, { start = false } = {}) {
   const key = `linked:${slug}`;
   const box = h('section', { class: 'fixable' });
-  let draft = null;   // {topic, role} while adding
+  let draft = start ? { topic: '', role: '' } : null;   // {topic, role} while adding
   const draw = () => {
     const text = section.text.replace(/<!--[\s\S]*?-->/g, '').trim();
     const pending = pendingFixes(key).filter((f) => !text.includes(`](../${f.topic}/project.md)`));
