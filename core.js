@@ -508,6 +508,10 @@ export const assignLines = (repo, q, lines, projects) =>
 export const dismissLines = (repo, q) =>
   sendRequest(repo, { type: 'dismiss', question: q.raw, note: q.note, label: q.label });
 
+/** Leave a whole note out of the wiki: it leaves the inbox and its questions are closed. The original is kept. */
+export const discardNote = (repo, q) =>
+  sendRequest(repo, { type: 'discard', question: q.raw, note: q.note });
+
 /**
  * Add a note to the inbox. `base64` is the file content. A caption, if given, is written
  * first as a sidecar file so it is already there when the note itself triggers ingest.

@@ -1206,7 +1206,8 @@ function questionCard(q, alreadySent) {
     select.addEventListener('change', sync);
     if (!registry.length) select.value = NEW;
     sync();
-    add(card, select, fresh, h('div', { class: 'row' }, go));
+    const discard = q.note ? h('button', { class: 'btn', type: 'button', onclick: (e) => submit(e.target, () => core.discardNote(repo, q), 'Discarding the note.') }, 'Discard this note') : null;
+    add(card, select, fresh, h('div', { class: 'row' }, go, discard));
   } else if (q.kind === 'reword') {
     add(card, h('div', { class: 'row' },
       h('button', { class: 'btn primary', type: 'button', onclick: (e) => submit(e.target, () => core.answerQuestion(repo, q, 'yes', ''), 'Changing the task.') }, 'Use the corrected wording'),
