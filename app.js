@@ -242,6 +242,7 @@ async function home() {
     h('div', { class: 'row' },
       h('a', { class: 'btn', href: '#/new' }, 'New topic'),
       h('a', { class: 'btn', href: '#/page/wiki/index.md' }, 'All notes'),
+      h('a', { class: 'btn', href: '#/page/wiki/activity.md' }, 'Activity'),
       h('a', { class: 'btn', href: '#/review' }, 'Health check'),
       h('a', { class: 'btn', href: '#/ask' }, 'Ask'),
       h('a', { class: 'btn', href: '#/setup' }, 'Settings')),
@@ -870,11 +871,26 @@ async function page(path) {
   }
   const facts = ['type', 'status', 'captured', 'device', 'project', 'origin_file', 'corrected'].filter((k) => meta[k] && meta[k] !== 'null');
   const note = /^raw\/[^/]+\/source\.md$/.test(path) ? notePage(path, md) : null;   // a note's transcription can be corrected in place
+  const outcome = parts[0] === 'raw' && parts[2] === 'source.md' ? await outcomeBox(parts[1]) : null;
   fill(view, 
     crumb(...trail),
     facts.length ? h('div', { class: 'meta' }, facts.map((k) => h('span', {}, `${k.replace('_', ' ')}: ${meta[k]}`))) : null,
+    outcome,
     note || renderMarkdown(body, path),
   );
+}
+
+/** What ingest did with a note (from wiki/activity.json), shown above its transcription. Null if not listed. */
+async function outcomeBox(id) {
+  let entries = [];
+  try { entries = JSON.parse(await repo.text('wiki/activity.json') || '[]'); } catch { return null; }
+  const e = entries.find((x) => x.id === id);
+  if (!e) return null;
+  const when = [e.date !== 'undated' ? e.date : '', e.time].filter(Boolean).join(' ');
+  return h('div', { class: 'outcome' + (e.warn.length ? ' warn' : '') },
+    h('h3', {}, 'What happened', when ? h('span', { class: 'muted' }, ` · ${when}`) : null),
+    e.warn.map((w) => h('p', { class: 'warnline' }, w)),
+    e.lines.map((x) => renderMarkdown(x, 'wiki/activity.md')));
 }
 
 const instructed = new Map();   // health item key or 'project:<slug>' -> [record ids] sent from this device

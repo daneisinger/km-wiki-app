@@ -168,3 +168,8 @@ button.btn.small{font-size:13px;padding:6px 10px}
 .askfix summary{cursor:pointer;color:var(--accent);margin:6px 0}
 .addsection{margin:8px 0 18px}
 .addrow{display:flex;flex-wrap:wrap;gap:6px 8px;align-items:center;margin:18px 0 8px;padding-top:12px;border-top:1px solid var(--line)}
+.outcome{background:var(--sheet);border:1px solid var(--line);border-left:4px solid var(--done);border-radius:8px;padding:10px 14px;margin:8px 0 14px}
+.outcome.warn{border-left-color:var(--danger)}
+.outcome h3{margin:0 0 4px;font-size:15px}
+.outcome p{margin:4px 0}
+.outcome .warnline{color:var(--danger)}
