@@ -501,6 +501,14 @@ export const createProject = (repo, { name, aliases, desc, kind }, q) =>
 /** Change a topic's kind (general, project or profile). */
 export const setKind = (repo, slug, kind) => sendRequest(repo, { type: 'set-kind', slug, kind });
 
+// A topic's status. "past" is shown as Archived: hidden on the home screen unless asked for, last in pickers.
+export const STATUSES = [['active', 'Active'], ['idea', 'Idea'], ['past', 'Archived']];
+export const statusLabel = (status) => (STATUSES.find(([k]) => k === status) || STATUSES[0])[1];
+export const isArchived = (p) => p.status === 'past';
+/** Topics with archived ones last, otherwise in the order given. */
+export const archivedLast = (list) => [...list].sort((a, b) => isArchived(a) - isArchived(b));
+export const setStatus = (repo, slug, status) => sendRequest(repo, { type: 'set-status', slug, status });
+
 /** File lines of one note under different projects: `lines` is [{text, to}] where `to` is a slug, 'ignore' or 'new:<name>'. */
 export const assignLines = (repo, q, lines, projects) =>
   sendRequest(repo, { type: 'assign', question: q.raw, note: q.note, label: q.label, lines, projects: projects || [] });

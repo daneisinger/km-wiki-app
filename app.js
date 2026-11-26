@@ -196,7 +196,7 @@ function addPending(path, question) {
 async function refreshChrome() {
   const files = await repo.tree();
   const overview = await core.loadOverview(repo);
-  registry = overview.projects;
+  registry = core.archivedLast(overview.projects);   // archived topics come last in every picker
   const badge = document.getElementById('badge-questions');
   badge.hidden = !overview.questions.length;
   badge.textContent = overview.questions.length;
@@ -220,6 +220,8 @@ const KIND_HELP = 'Project: a piece of work with tasks. General: an ongoing subj
 
 async function home() {
   const o = await refreshChrome();
+  const showArchived = !!store.get('showArchived', false);
+  const archived = registry.filter(core.isArchived).length;
   fill(view, 
     h('h1', {}, 'Topics'),
     o.questions.length || o.inboxCount || (o.health && o.health.count) ? h('div', { class: 'cards' },
@@ -228,17 +230,21 @@ async function home() {
       o.health && o.health.count ? h('a', { class: 'card attn', href: '#/review' }, h('h3', {}, `${o.health.count} thing${o.health.count > 1 ? 's' : ''} to review`), h('div', { class: 'muted' }, `From the health check on ${o.health.checked}.`)) : null,
     ) : null,
     [['project', 'Projects'], ['general', 'General'], ['profile', 'Profiles']].map(([kind, heading]) => {
-      const group = o.projects.filter((p) => (p.kind || 'project') === kind);
+      const group = registry.filter((p) => (p.kind || 'project') === kind && (showArchived || !core.isArchived(p)));
       return group.length ? [h('h2', {}, heading), h('div', { class: 'cards' }, group.map((p) => {
         const number = p.aliases.find((a) => /^\d+$/.test(a));
-        return h('a', { class: 'card', href: '#/p/' + p.slug },
+        return h('a', { class: 'card' + (core.isArchived(p) ? ' archived' : ''), href: '#/p/' + p.slug },
           h('h3', {}, p.name), number ? h('div', { class: 'num' }, number) : null,
+          core.isArchived(p) ? h('div', { class: 'muted' }, 'Archived') : null,
           h('div', { class: 'counts' },
             h('span', {}, h('b', {}, p.counts.open), ' open'),
             h('span', {}, h('b', {}, p.counts.question), ' questions'),
             h('span', {}, h('b', {}, p.counts.done), ' done')));
       }))] : null;
     }),
+    archived ? h('label', { class: 'showarchived' },
+      h('input', { type: 'checkbox', checked: showArchived, onchange: (e) => { store.set('showArchived', e.target.checked); home(); } }),
+      ` Show archived (${archived})`) : null,
     h('div', { class: 'row' },
       h('a', { class: 'btn', href: '#/new' }, 'New topic'),
       h('a', { class: 'btn', href: '#/page/wiki/index.md' }, 'All notes'),
@@ -261,6 +267,7 @@ async function project(slug) {
   fill(view, 
     crumb({ href: '#/', label: 'Topics' }, { label: p.name }),
     kindLine(p),
+    statusLine(p),
     projectPage(slug, md, p, [h('h2', {}, 'Tasks'), taskSection(slug, tasksMd)]),
     h('h2', {}, 'Pages'),
     h('div', { class: 'row' }, pages.map((f, i) => h('a', { class: 'btn', href: '#/page/' + f }, titles[i])),
@@ -294,6 +301,32 @@ function kindLine(p) {
         h('button', { class: 'btn small', type: 'button', onclick: () => show(p.kind) }, 'Cancel')));
   };
   show(p.kind || 'project');
+  return line;
+}
+
+/** "Status: Active", with a way to change it (Active, Idea, Archived). Applied on GitHub like any other request. */
+function statusLine(p) {
+  const line = h('p', { class: 'muted' });
+  const show = (status, pending) => fill(line, `Status: ${core.statusLabel(status)}`, pending ? ' (pending)' : '', ' ',
+    pending ? null : h('button', { class: 'btn small', type: 'button', onclick: edit }, 'Change'));
+  const edit = () => {
+    const select = h('select', { id: `status-${p.slug}`, 'aria-label': 'Status' },
+      core.STATUSES.map(([k, label]) => h('option', { value: k, selected: k === (p.status || 'active') }, label)));
+    fill(line, h('label', { for: select.id }, 'Status'), select,
+      h('p', { class: 'help' }, 'Archived topics are hidden on the home screen unless you tick Show archived, and come last when you pick a topic. They stay in search, Ask and All notes, and notes can still be filed to them.'),
+      h('div', { class: 'row tight' },
+        h('button', { class: 'btn small primary', type: 'button', onclick: async (e) => {
+          if (select.value === (p.status || 'active')) { show(p.status); return; }
+          e.target.disabled = true;
+          try {
+            addPending(await core.setStatus(repo, p.slug, select.value), '');
+            toast('Saved. It changes within a minute or two.', 5000);
+            show(select.value, true);
+          } catch (err) { e.target.disabled = false; toast(`Could not send: ${err.message}`, 7000); }
+        } }, 'Save'),
+        h('button', { class: 'btn small', type: 'button', onclick: () => show(p.status) }, 'Cancel')));
+  };
+  show(p.status || 'active');
   return line;
 }
 

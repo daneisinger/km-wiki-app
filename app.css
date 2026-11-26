@@ -173,3 +173,5 @@ button.btn.small{font-size:13px;padding:6px 10px}
 .outcome h3{margin:0 0 4px;font-size:15px}
 .outcome p{margin:4px 0}
 .outcome .warnline{color:var(--danger)}
+.card.archived{opacity:.6}
+label.showarchived{display:flex;align-items:center;gap:6px;margin:10px 0}
