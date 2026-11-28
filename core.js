@@ -4,7 +4,9 @@
 // so this file can be imported unchanged by the web app and by a React Native
 // (Supernote) plugin. All screens and rendering live elsewhere.
 
-export const today = () => new Date().toISOString().slice(0, 10);
+/** Today's date on this device (local time, not UTC, which is already tomorrow in the evening in the Americas). */
+export const today = (now = new Date()) =>
+  `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
 // ---------- text helpers ----------
 
